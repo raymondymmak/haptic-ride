@@ -34,10 +34,16 @@ def lan_ip() -> str:
 
 
 class Hub:
-    def __init__(self, mode: str):
+    def __init__(self, mode: str, source: str | None = None):
         self.mode = mode
+        if source in ("sim", "real"):
+            self.source = source
+        else:
+            self.source = "sim" if mode == "fake" else "real"
         self.clients: set = set()
         self.on_buzz = None
+        # (value) -> "sim" | "real" | None. None leaves the source unchanged.
+        self.on_mode = None
         self._lock = asyncio.Lock()
         self._buzz_log: dict[str, tuple] = {}
 
@@ -83,13 +89,30 @@ class Hub:
         who = getattr(ws, "remote_address", "?")
         print(f"join   {who}  ({len(self.clients)} on the bus)", flush=True)
         try:
-            await ws.send(json.dumps({"type": "hello", "role": "bridge", "mode": self.mode}))
+            await ws.send(json.dumps({
+                "type": "hello",
+                "role": "bridge",
+                "mode": self.mode,
+                "source": self.source,
+            }))
             async for raw in ws:
                 try:
                     msg = json.loads(raw)
                 except json.JSONDecodeError:
                     continue
                 if not isinstance(msg, dict) or "type" not in msg:
+                    continue
+                if msg["type"] == "mode":
+                    value = msg.get("value")
+                    if value not in ("sim", "real") or self.on_mode is None:
+                        continue
+                    accepted = self.on_mode(value)
+                    if asyncio.iscoroutine(accepted):
+                        accepted = await accepted
+                    if accepted not in ("sim", "real"):
+                        continue
+                    self.source = accepted
+                    await self.broadcast({"type": "mode", "value": accepted})
                     continue
                 if msg["type"] == "buzz":
                     if not self._accept_buzz(msg):

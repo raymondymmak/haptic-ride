@@ -43,7 +43,8 @@ def check_static_and_approach(mod) -> None:
 
     outlier = mod.spectrum(ranges, [(mod.STATIC_DIST_M, mod.STATIC_AMP), (6.0, 40.0)])
     assert tracker.update(outlier, 2.0) is None
-    assert tracker._streak == 1
+    assert len(tracker._tracks) == 1
+    assert tracker._tracks[0]["streak"] == 1
 
     dt = 0.2
     readings = []
@@ -52,18 +53,63 @@ def check_static_and_approach(mod) -> None:
         readings.append(tracker.update(mag, t))
         t += dt
 
-    # 5 quiet + 1 outlier + 2 quiet, then the approach. Nothing before the 3rd approach frame.
+    # 5 quiet + 1 outlier + 2 quiet, then the approach.
+    # The smoothing window is 5 frames, so nothing publishes before the 5th approach frame.
     quiet = 5 + 1 + 2
-    assert all(reading is None for reading in readings[: quiet + 2]), readings[: quiet + 2]
-    first = readings[quiet + 2]
+    assert all(reading is None for reading in readings[: quiet + 4]), readings[: quiet + 4]
+    first = readings[quiet + 4]
     assert first is not None
-    assert 7.0 < first["dist"] < 8.2
+    assert 6.2 < first["dist"] < 8.2
     assert 1.2 < first["speed"] < 2.8
     emitted = [reading for reading in readings[quiet:] if reading is not None]
-    assert len(emitted) >= 8
-    assert all(reading["speed"] > 0.8 for reading in emitted)
+    assert len(emitted) >= 6, emitted
+    assert all(reading["speed"] >= tracker.min_approach for reading in emitted)
+    assert emitted[0]["dist"] > 6.0
     assert emitted[-1]["dist"] < emitted[0]["dist"]
+    assert all(reading["dist"] > 2.4 for reading in emitted)
     print("ok  static clutter is silent and a closing car is emitted")
+
+
+def check_roof_peaks_and_adaptive_background(mod) -> None:
+    """The live failure: 1.74 m and ~4.9 m, speed jittering around zero, swapping which is louder."""
+    ranges = mod.range_axis()
+    tracker = mod.RangeTracker(ranges, bg_alpha=0.05, min_approach=0.4)
+    calibrate(tracker, mod.spectrum(ranges, []))
+    bin_174 = min(range(len(ranges)), key=lambda i: abs(ranges[i] - 1.74))
+    before = tracker.background[bin_174]
+
+    for i in range(24):
+        if i % 2 == 0:
+            mag = mod.spectrum(ranges, [(1.74, 50.0), (4.9, 28.0)])
+        else:
+            mag = mod.spectrum(ranges, [(1.74, 26.0), (4.9, 48.0)])
+        assert tracker.update(mag, i * 0.2) is None, tracker.note
+    assert tracker.note.startswith("static")
+    assert tracker.background[bin_174] > before + 5.0
+
+    # A car closing from 8 m is the detection. The nearer roof peaks are not.
+    readings = []
+    dist = 8.0
+    t = 20.0
+    for _ in range(10):
+        mag = mod.spectrum(ranges, [(1.74, 40.0), (4.9, 36.0), (dist, 30.0)])
+        readings.append(tracker.update(mag, t))
+        dist -= 0.35
+        t += 0.2
+    emitted = [reading for reading in readings if reading is not None]
+    assert len(emitted) >= 4, readings
+    assert all(reading["dist"] > 5.5 for reading in emitted), emitted
+    assert all(reading["speed"] >= 0.4 for reading in emitted)
+    assert emitted[-1]["dist"] < emitted[0]["dist"]
+
+    # Moving away is silence, even when it is loud and persistent.
+    receding = mod.RangeTracker(ranges, min_approach=0.4)
+    calibrate(receding, mod.spectrum(ranges, []))
+    dist = 3.0
+    for i in range(10):
+        assert receding.update(mod.spectrum(ranges, [(dist, 40.0)]), i * 0.2) is None, receding.note
+        dist += 0.4
+    print("ok  roof peaks at 1.74 m and 4.9 m stay silent; a closing car publishes")
 
 
 def check_threshold_and_near_range(mod) -> None:
@@ -82,41 +128,46 @@ def check_threshold_and_near_range(mod) -> None:
 
     strong = floor[:]
     strong[weak_i] = 30.0
-    got = None
-    for i in range(3):
-        got = tracker.update(strong, 10 + i)
-    assert got is not None and abs(got["dist"] - ranges[weak_i]) < 0.2
+    for i in range(8):
+        assert tracker.update(strong, 10 + i * 0.2) is None
+    assert tracker.note.startswith("static")
 
     near_i = min(range(len(ranges)), key=lambda i: abs(ranges[i] - 0.15))
     assert ranges[near_i] < 0.3
-    far_i = weak_i
-    leaked = [0.0] * len(ranges)
-    leaked[near_i] = 100.0
-    leaked[far_i] = 15.0
-    fresh = mod.RangeTracker(ranges, threshold_k=6)
+    fresh = mod.RangeTracker(ranges, threshold_k=6, min_approach=0.4)
     calibrate(fresh, zeros)
-    got = None
-    for i in range(3):
-        got = fresh.update(leaked, i)
-    assert got is not None
-    assert got["dist"] > 1.0
-    print("ok  weak peaks and bins under 0.3 m are ignored")
+    dist = 3.0
+    emitted = []
+    for i in range(6):
+        mag = [1.0] * len(ranges)
+        mag[near_i] = 100.0
+        far_i = min(range(len(ranges)), key=lambda n: abs(ranges[n] - dist))
+        mag[far_i] = 15.0
+        reading = fresh.update(mag, i * 0.2)
+        if reading is not None:
+            emitted.append(reading)
+        dist -= 0.4
+    assert emitted
+    assert all(reading["dist"] > 1.0 for reading in emitted)
+    assert all(reading["speed"] >= 0.4 for reading in emitted)
+    print("ok  weak peaks, static peaks, and bins under 0.3 m are ignored")
 
 
 def check_median_smooth(mod) -> None:
     ranges = mod.range_axis()
-    tracker = mod.RangeTracker(ranges, threshold_k=6, max_step_m=20, smooth_frames=5)
+    tracker = mod.RangeTracker(ranges, threshold_k=6, max_step_m=20, smooth_frames=5, min_approach=0.4)
     calibrate(tracker, [0.0] * len(ranges))
-    indexes = []
-    for dist in (5.0, 5.0, 5.0, 5.0, 1.0):
-        indexes.append(min(range(len(ranges)), key=lambda i: abs(ranges[i] - dist)))
+    # Four samples closing, then one frame that leaps much closer. The median stays with the trend.
+    series = (8.0, 7.4, 6.8, 6.2, 3.0)
     reading = None
-    for n, index in enumerate(indexes):
+    for n, dist in enumerate(series):
+        index = min(range(len(ranges)), key=lambda i: abs(ranges[i] - dist))
         mag = [1.0] * len(ranges)
         mag[index] = 40.0
-        reading = tracker.update(mag, n)
+        reading = tracker.update(mag, n * 0.2)
     assert reading is not None
-    assert reading["dist"] > 4.0  # the 1 m sample does not win the median
+    assert reading["dist"] > 6.0
+    assert reading["speed"] >= 0.4
     print("ok  median of five frames rejects a one-frame jump")
 
 
@@ -160,6 +211,7 @@ async def check_socket() -> None:
             if msg.get("type") == "car":
                 cars.append(msg)
     assert len(cars) >= 4
+    assert all(car["id"] == "radar" for car in cars)
     assert all(car["side"] == "right" for car in cars)
     assert all(car["type"] == "car" and "dist" in car and "speed" in car for car in cars)
     assert all(car["speed"] > 0.5 for car in cars)
@@ -169,12 +221,62 @@ async def check_socket() -> None:
         for j in range(i + 1, len(cars))
     )
     assert closing
+
+    async with connect(url) as sock:
+        hello = json.loads(await asyncio.wait_for(sock.recv(), timeout=3))
+        assert hello["type"] == "hello" and hello["source"] == "real"
+        await sock.send(json.dumps({"type": "mode", "value": "sim"}))
+        saw_mode = False
+        saw_nav = False
+        sim_cars = []
+        settle = 0.0
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            msg = json.loads(await asyncio.wait_for(sock.recv(), timeout=4))
+            if msg.get("type") == "mode" and msg.get("value") == "sim":
+                saw_mode = True
+                settle = time.monotonic() + 0.4
+                continue
+            if not saw_mode:
+                continue
+            if msg.get("type") == "nav":
+                saw_nav = True
+            if msg.get("type") == "car" and str(msg.get("id", "")).startswith("c"):
+                sim_cars.append(msg)
+            if msg.get("type") == "car" and msg.get("id") == "radar" and time.monotonic() >= settle:
+                raise AssertionError(msg)
+            if saw_nav and sim_cars and time.monotonic() >= settle:
+                break
+        assert saw_mode and saw_nav and sim_cars
+
+        await sock.send(json.dumps({"type": "mode", "value": "real"}))
+        saw_real = False
+        saw_nav = False
+        radar_back = False
+        settle = 0.0
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline and not (saw_real and saw_nav and radar_back and time.monotonic() >= settle):
+            msg = json.loads(await asyncio.wait_for(sock.recv(), timeout=4))
+            if msg.get("type") == "mode" and msg.get("value") == "real":
+                saw_real = True
+                settle = time.monotonic() + 0.4
+                continue
+            if not saw_real or time.monotonic() < settle:
+                continue
+            if msg.get("type") == "nav":
+                saw_nav = True
+            if msg.get("type") == "car" and str(msg.get("id", "")).startswith("c"):
+                raise AssertionError(msg)
+            if msg.get("type") == "car" and msg.get("id") == "radar":
+                radar_back = True
+        assert saw_real and saw_nav and radar_back
     print("ok  --synthetic publishes a closing car on the websocket")
 
 
 def main() -> None:
     mod = load_filter()
     check_static_and_approach(mod)
+    check_roof_peaks_and_adaptive_background(mod)
     check_threshold_and_near_range(mod)
     check_median_smooth(mod)
 

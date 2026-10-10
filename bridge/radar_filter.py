@@ -1,13 +1,12 @@
 """Turn a range-FFT magnitude into a single car, or into silence.
 
-The BGT60TR13C distance example reports the strongest bin. With nothing
-inside 6 m that bin is often a static reflection around 4 m. This filter
-subtracts an empty-scene average, keeps a peak only when it clears
-k times the median of the bins past the minimum range, and emits only
-after the same target has held for several frames.
-
-Speed is the closing rate of that distance trend (positive when the
-target is approaching). Distance is the median of the last few peaks.
+The BGT60TR13C distance example reports the strongest bin. A roof or a
+wall leaves several of those, and they jitter by a bin from frame to
+frame. This filter subtracts an empty-scene average, then keeps folding
+static bins back into that average. It follows every peak that clears
+the threshold, and publishes only the nearest one that is actually
+approaching: closing speed at least `min_approach`, and the distance
+net-decreasing across the smoothing window.
 """
 
 from __future__ import annotations
@@ -16,15 +15,20 @@ import statistics
 
 # Tunables. The bridge CLI overrides these.
 BG_FRAMES = 20
+BG_ALPHA = 0.02
 THRESHOLD_K = 6.0
 MIN_RANGE_M = 0.3
 PERSIST_FRAMES = 3
 SMOOTH_FRAMES = 5
 MAX_STEP_M = 1.5
+MIN_APPROACH_MPS = 0.4
 
 # The false peak Raymond sees on an empty scene, used by --synthetic.
 STATIC_DIST_M = 4.7
 STATIC_AMP = 12.0
+# Roof returns from the live kit: nothing moving, still two strong bins.
+ROOF_DIST_M = (1.74, 4.9)
+ROOF_AMP = (40.0, 34.0)
 CLOSING_MPS = 2.0
 
 
@@ -59,19 +63,25 @@ def empty_scene(ranges: list[float]) -> list[float]:
     return spectrum(ranges, [(STATIC_DIST_M, STATIC_AMP)])
 
 
+def roof_clutter(ranges: list[float]) -> list[tuple[float, float]]:
+    return list(zip(ROOF_DIST_M, ROOF_AMP))
+
+
 def demo_live_frames(ranges: list[float], dt: float, closing_mps: float = CLOSING_MPS) -> list[list[float]]:
     """Quiet scene, one 6 m outlier, then a car closing from 8 m.
 
-    The outlier and the static peak must not produce a car. The closing
-    target does, once it has lasted long enough.
+    The roof peaks at 1.74 m and 4.9 m are not in the calibration, so
+    they show up as new static energy. They must stay silent. The
+    outlier and the original 4.7 m peak must stay silent too.
     """
-    frames = [empty_scene(ranges) for _ in range(5)]
-    frames.append(spectrum(ranges, [(STATIC_DIST_M, STATIC_AMP), (6.0, 40.0)]))
-    frames.extend(empty_scene(ranges) for _ in range(2))
+    clutter = [(STATIC_DIST_M, STATIC_AMP), *roof_clutter(ranges)]
+    frames = [spectrum(ranges, clutter) for _ in range(5)]
+    frames.append(spectrum(ranges, [*clutter, (6.0, 40.0)]))
+    frames.extend(spectrum(ranges, clutter) for _ in range(2))
     dist = 8.0
     step = closing_mps * dt
-    for _ in range(12):
-        frames.append(spectrum(ranges, [(STATIC_DIST_M, STATIC_AMP), (dist, 30.0)]))
+    for _ in range(16):
+        frames.append(spectrum(ranges, [*clutter, (dist, 30.0)]))
         dist -= step
     return frames
 
@@ -93,37 +103,54 @@ def closing_speed(history: list[tuple[float, float]]) -> float:
     return -slope
 
 
+def approach_state(history: list[tuple[float, float]], min_approach: float) -> tuple[bool, float, float]:
+    """Whether this window is a sustained approach, plus speed and median distance.
+
+    Sustained means the smoothing window itself moved closer: the last
+    sample is nearer than the first, and the median is nearer than the
+    first. A one-frame dip does not move the median, so it does not count.
+    """
+    speed = closing_speed(history)
+    dists = [dist for _, dist in history]
+    smoothed = statistics.median(dists)
+    start = dists[0]
+    closing = dists[-1] < start and smoothed < start and speed >= min_approach
+    return closing, speed, smoothed
+
+
 class RangeTracker:
     def __init__(
         self,
         ranges_m: list[float],
         *,
         bg_frames: int = BG_FRAMES,
+        bg_alpha: float = BG_ALPHA,
         threshold_k: float = THRESHOLD_K,
         min_range_m: float = MIN_RANGE_M,
         persist_frames: int = PERSIST_FRAMES,
         smooth_frames: int = SMOOTH_FRAMES,
         max_step_m: float = MAX_STEP_M,
+        min_approach: float = MIN_APPROACH_MPS,
     ) -> None:
         self.ranges = [float(r) for r in ranges_m]
         self.bg_frames = bg_frames
+        self.bg_alpha = bg_alpha
         self.threshold_k = threshold_k
         self.min_range_m = min_range_m
         self.persist_frames = persist_frames
         self.smooth_frames = smooth_frames
         self.max_step_m = max_step_m
+        self.min_approach = min_approach
         self.background: list[float] | None = None
         self.note = "not calibrated"
         self._cal: list[list[float]] = []
-        self._streak = 0
-        self._last_dist: float | None = None
-        self._history: list[tuple[float, float]] = []
+        self._tracks: list[dict] = []
 
     def start_calibration(self) -> None:
         self._cal = []
         self.background = None
         self.note = "calibrating"
-        self._reset_track()
+        self._tracks = []
 
     def calibrate_frame(self, magnitudes) -> int:
         """Add one empty-scene magnitude. Returns how many frames are in the average."""
@@ -137,28 +164,93 @@ class RangeTracker:
             self.note = "background ready"
         return count
 
-    def _reset_track(self) -> None:
-        self._streak = 0
-        self._last_dist = None
-        self._history = []
-
-    def _peak(self, clean: list[float]) -> tuple[int, float] | None:
+    def _peaks(self, clean: list[float]) -> list[tuple[int, float]]:
+        """Local maxima at or beyond min range that clear k × the median."""
         usable = [
             (i, clean[i]) for i, dist in enumerate(self.ranges) if dist >= self.min_range_m
         ]
         if not usable:
             self.note = "no bins past min range"
-            return None
+            return []
         floor = statistics.median([value for _, value in usable])
         thresh = self.threshold_k * floor
-        index, value = max(usable, key=lambda item: item[1])
-        if value <= thresh:
+        found: list[tuple[int, float]] = []
+        last = len(clean) - 1
+        for i, dist in enumerate(self.ranges):
+            if dist < self.min_range_m or clean[i] <= thresh:
+                continue
+            left = clean[i - 1] if i > 0 else -1.0
+            right = clean[i + 1] if i < last else -1.0
+            if clean[i] >= left and clean[i] >= right:
+                found.append((i, dist))
+        if not found:
+            index = max(usable, key=lambda item: item[1])[0]
             self.note = f"below threshold  {self.ranges[index]:.2f} m"
-            return None
-        return index, self.ranges[index]
+        return found
+
+    def _associate(self, peaks: list[tuple[int, float]], t: float) -> None:
+        """Keep each peak on the track it already belongs to. Far jumps start a new track."""
+        pairs: list[tuple[float, int, int]] = []
+        for ti, track in enumerate(self._tracks):
+            for pi, (_index, dist) in enumerate(peaks):
+                err = abs(dist - track["last"])
+                if err <= self.max_step_m:
+                    pairs.append((err, ti, pi))
+        pairs.sort()
+        used_tracks: set[int] = set()
+        used_peaks: set[int] = set()
+        for _err, ti, pi in pairs:
+            if ti in used_tracks or pi in used_peaks:
+                continue
+            used_tracks.add(ti)
+            used_peaks.add(pi)
+            index, dist = peaks[pi]
+            track = self._tracks[ti]
+            track["index"] = index
+            track["last"] = dist
+            track["streak"] += 1
+            track["history"].append((float(t), dist))
+            if len(track["history"]) > self.smooth_frames:
+                track["history"] = track["history"][-self.smooth_frames :]
+        self._tracks = [track for i, track in enumerate(self._tracks) if i in used_tracks]
+        for pi, (index, dist) in enumerate(peaks):
+            if pi in used_peaks:
+                continue
+            self._tracks.append(
+                {"index": index, "last": dist, "streak": 1, "history": [(float(t), dist)]}
+            )
+
+    def _ready(self, track: dict) -> bool:
+        return track["streak"] >= self.persist_frames and len(track["history"]) >= self.smooth_frames
+
+    def _guard(self, index: int) -> set[int]:
+        return {i for i in (index - 1, index, index + 1) if 0 <= i < len(self.ranges)}
+
+    def _adapt(self, magnitudes, frozen: set[int]) -> None:
+        """Fold bins that are not an approaching target into the background."""
+        if self.background is None or self.bg_alpha <= 0:
+            return
+        keep = 1.0 - self.bg_alpha
+        alpha = self.bg_alpha
+        bg = self.background
+        for i, mag in enumerate(magnitudes):
+            if i in frozen:
+                continue
+            bg[i] = keep * bg[i] + alpha * float(mag)
+
+    def _hold_note(self) -> None:
+        if not self._tracks:
+            return
+        nearest = min(self._tracks, key=lambda track: track["last"])
+        need = max(self.persist_frames, self.smooth_frames)
+        if not self._ready(nearest):
+            self.note = f"wait {nearest['streak']}/{need}  {nearest['last']:.2f} m"
+            return
+        _closing, speed, _dist = approach_state(nearest["history"], self.min_approach)
+        self.note = f"static {nearest['last']:.2f} m {speed:+.2f} m/s"
 
     def update(self, magnitudes, t: float) -> dict | None:
-        """Return {dist, speed} when a target is present, else None."""
+        """Return {dist, speed} for the nearest approaching target, else None."""
         if self.background is None:
             self.note = "not calibrated"
             return None
@@ -166,22 +258,26 @@ class RangeTracker:
             self.note = "frame length changed"
             return None
         clean = [max(0.0, float(m) - b) for m, b in zip(magnitudes, self.background)]
-        found = self._peak(clean)
-        if found is None:
-            self._reset_track()
+        peaks = self._peaks(clean)
+        if not peaks:
+            self._tracks = []
+            self._adapt(magnitudes, set())
             return None
-        _index, dist = found
-        if self._last_dist is not None and abs(dist - self._last_dist) > self.max_step_m:
-            self._reset_track()
-        self._streak += 1
-        self._last_dist = dist
-        self._history.append((float(t), dist))
-        if len(self._history) > self.smooth_frames:
-            self._history = self._history[-self.smooth_frames :]
-        if self._streak < self.persist_frames:
-            self.note = f"wait {self._streak}/{self.persist_frames}  {dist:.2f} m"
+        self._associate(peaks, t)
+        approaching: list[tuple[float, float, dict]] = []
+        frozen: set[int] = set()
+        for track in self._tracks:
+            if not self._ready(track):
+                continue
+            closing, speed, dist = approach_state(track["history"], self.min_approach)
+            if not closing:
+                continue
+            approaching.append((dist, speed, track))
+            frozen |= self._guard(track["index"])
+        self._adapt(magnitudes, frozen)
+        if not approaching:
+            self._hold_note()
             return None
-        smoothed = statistics.median([d for _, d in self._history])
-        speed = closing_speed(self._history)
+        dist, speed, _track = min(approaching, key=lambda item: item[0])
         self.note = "emit"
-        return {"dist": smoothed, "speed": speed}
+        return {"dist": dist, "speed": speed}

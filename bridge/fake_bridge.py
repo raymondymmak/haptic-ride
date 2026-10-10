@@ -106,7 +106,19 @@ async def emit(hub: Hub, recorder: Recorder | None, msg: dict) -> None:
         recorder.write(msg)
 
 
-async def simulate(hub: Hub, recorder: Recorder | None, tick: float) -> None:
+def keep_simulated(value: str) -> str:
+    """The scripted bridge has no radar. A Real request stays on the demo."""
+    if value == "real":
+        print("mode   sim  (this bridge stays on the scripted route)", flush=True)
+    return "sim"
+
+
+async def simulate(hub: Hub, recorder: Recorder | None, tick: float, emit_cars=None) -> None:
+    """Nav cues every tick. Scripted cars too, unless emit_cars() is false.
+
+    The hardware bridge reuses this so the demo route can replace radar
+    cars without a restart, while the turn cues keep running either way.
+    """
     t0 = time.monotonic()
     lap_seen = -1
     announced: set[str] = set()
@@ -125,15 +137,16 @@ async def simulate(hub: Hub, recorder: Recorder | None, tick: float) -> None:
                 announced.add(nav["id"])
                 print(f"nav   {nav['turn']:5}  in {nav['in_m']:.0f} m", flush=True)
             await emit(hub, recorder, nav)
-        for car in cars_at(t, lap):
-            if car["id"] not in announced:
-                announced.add(car["id"])
-                kind = "BLUE" if car["speed"] >= 8 else "car"
-                print(
-                    f"{kind:5} {car['side']:5}  {car['dist']:.0f} m   {car['speed']} m/s",
-                    flush=True,
-                )
-            await emit(hub, recorder, car)
+        if emit_cars is None or emit_cars():
+            for car in cars_at(t, lap):
+                if car["id"] not in announced:
+                    announced.add(car["id"])
+                    kind = "BLUE" if car["speed"] >= 8 else "car"
+                    print(
+                        f"{kind:5} {car['side']:5}  {car['dist']:.0f} m   {car['speed']} m/s",
+                        flush=True,
+                    )
+                await emit(hub, recorder, car)
         await asyncio.sleep(tick)
 
 
@@ -182,7 +195,8 @@ def banner(args) -> None:
 
 
 async def amain(args) -> None:
-    hub = Hub(mode="fake")
+    hub = Hub(mode="fake", source="sim")
+    hub.on_mode = keep_simulated
     recorder = Recorder(args.record) if args.record else None
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()

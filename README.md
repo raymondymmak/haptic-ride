@@ -18,6 +18,8 @@ Open [http://127.0.0.1:8641](http://127.0.0.1:8641).
 | `←` / `→` | Turn left / right |
 | `M` | Tick sounds for the screen recording |
 
+The overlay header has a **Simulated / Real** control. On the hardware bridge it swaps the car source without restarting the process. Turn cues keep running in both.
+
 Shoulder-check the ring that says CHECK. Turn when the arrow says NOW. The loop is 56 seconds and then repeats.
 
 Two phones on the same Wi-Fi can stand in for the rings. Android Chrome will vibrate; iPhone Safari does not implement the vibration API, so the phone still shows the pattern.
@@ -62,6 +64,7 @@ shoulder_check, turn      overlay →  game          (later: ring IMU)
 buzz                      game    →  bridge, overlay
 state                     game    →  overlay
 hello                     bridge  →  whoever just connected
+mode                      overlay →  bridge → everyone
 ```
 
 ## Protocol
@@ -75,9 +78,12 @@ One JSON object per WebSocket text frame. Fields the engine adds (`id`, and the 
 {"type": "nav", "turn": "right", "in_m": 18.0, "id": "n0-1"}
 {"type": "shoulder_check", "side": "left"}
 {"type": "turn", "turn": "right"}
+{"type": "mode", "value": "sim"}
 ```
 
 `speed` is closing speed in m/s, positive when the car is approaching. `dist` and `in_m` are meters. `id` lets two cars exist at once; without it the engine treats the side as the id.
+
+`mode` asks the bridge to change car source. `value` is `sim` or `real`. The bridge answers with the same message, to every client, using the value it actually applied. `hello` also carries `source` (`sim` or `real`) plus `mode` (`fake`, `real`, or `synthetic`), which is which process you joined.
 
 **Buzz** (game → rings). `intensity` is 0 to 1 and rises as distance falls.
 
@@ -166,7 +172,9 @@ The distance example (`distance_fft.py`) reports the strongest range bin. With n
 
 1. Averages 20 empty-scene range-FFT frames at first launch and subtracts that profile. Later launches reuse `logs/radar_background.json`. `--recalibrate` measures it again — point the radar at an empty scene when you do.
 2. Ignores bins under 0.3 m, and ignores a peak that is not above `k` times the median of the remaining bins (`--threshold-k`, default 6).
-3. Emits a car only after the same target shows up in 3 consecutive frames. Distance is the median of the last 5 peaks. Speed is the closing rate of that trend, positive when the target is approaching.
+3. Follows every peak that clears the threshold. A car is published only when that peak has filled the smoothing window (default 5 frames), the distance is net-decreasing across the window, and the closing speed is at least `--min-approach` (default 0.4 m/s). A roof return that sits still, or jitters between about −0.1 and +0.1 m/s, stays silent. So does anything moving away.
+4. When more than one peak is approaching, the nearest one is the car. Two static peaks no longer take turns (the live failure was 1.74 m, then 4.9 m, then 1.74 m again).
+5. Bins that are not an approaching target keep updating the background with an exponential moving average (`--bg-alpha`, default 0.02). A reflection that appears after calibration slowly fades. `--bg-alpha 0` freezes the background at the saved average.
 
 This kit does not resolve left and right. `--side` chooses the ring (default `right`).
 
@@ -179,7 +187,7 @@ set PYTHONPATH=%CD%
 py -3.14 C:\path\to\haptic-ride\bridge\real_bridge_stub.py --host 0.0.0.0 --port 8765 --http-port 8641 --if-gain 33
 ```
 
-The first 20 frames (about 4 seconds) are the empty scene unless a background file is already there. The console prints `radar  right   4.72 m  +0.80 m/s` when a target is actually present, and `radar  below threshold` or `radar  wait 2/3` when it is not.
+The first 20 frames (about 4 seconds) are the empty scene unless a background file is already there. The console prints `radar  right   4.72 m  +0.80 m/s` when a target is closing, `radar  static 1.74 m +0.02 m/s` when a reflection is just sitting there, and `radar  below threshold` or `radar  wait 2/5` while a peak is still unconfirmed.
 
 On the Mac, use the VM's IP (`ipconfig` on the VM):
 
@@ -188,6 +196,8 @@ python3 engine/game.py --url ws://VM_IP:8765
 ```
 
 Open `http://VM_IP:8641` in the Mac browser. That page's websocket goes back to the VM, which is the only bridge. One game engine, on the Mac.
+
+The page starts on **Real** (the radar). **Simulated** sends `{"type":"mode","value":"sim"}`. The process stays up: radar frames keep being read, but cars on the bus switch to the scripted route from `fake_bridge.py` (`nav_at` / `cars_at`). **Real** sends `value: "real"` and radar cars publish again. Turn cues from that same route keep streaming in both modes, so the rings still get SOON and NOW while you are on the live radar. The header shows the source that the bridge confirmed (`HARDWARE · REAL` or `HARDWARE · SIMULATED`). The fake bridge has no radar, so it answers every mode request with `sim` and the scripted demo does not stop.
 
 To try the filter with no kit, on either machine:
 
@@ -223,7 +233,7 @@ Crop the browser over the bike shot. The edge of the screen glows on the buzzing
 
 ```text
 bridge/fake_bridge.py        sim, record, replay, overlay HTTP
-bridge/real_bridge_stub.py   BGT60TR13C distance FFT, ring TODO
+bridge/real_bridge_stub.py   radar or scripted cars, nav in both, ring TODO
 bridge/radar_filter.py      background, threshold, persistence
 bridge/hub.py                WebSocket fan-out
 engine/game.py               haptics + score

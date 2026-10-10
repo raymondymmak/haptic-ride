@@ -162,6 +162,7 @@ async def live_sim(ws_port: int, http_port: int) -> None:
     page = urllib.request.urlopen(f"http://127.0.0.1:{http_port}/", timeout=2).read().decode()
     assert "HAPTIC RIDE" in page
     assert "navigator.vibrate" in page
+    assert "mode-sim" in page and "Simulated" in page and "Real" in page
     assert "__WS_PORT__" not in page
     assert f'"{ws_port}"' in page
 
@@ -169,9 +170,34 @@ async def live_sim(ws_port: int, http_port: int) -> None:
         return msg.get("type") == "car" and msg.get("side") == "right"
 
     seen = await wait_for(f"ws://127.0.0.1:{ws_port}", ready, 8)
-    assert any(msg.get("type") == "hello" and msg.get("mode") == "fake" for msg in seen)
+    assert any(msg.get("type") == "hello" and msg.get("mode") == "fake" and msg.get("source") == "sim" for msg in seen)
     assert any(msg.get("type") == "nav" for msg in seen)
+
+    from websockets.asyncio.client import connect
+
+    async with connect(f"ws://127.0.0.1:{ws_port}") as sock:
+        hello = json.loads(await asyncio.wait_for(sock.recv(), timeout=3))
+        assert hello["source"] == "sim"
+        await sock.send(json.dumps({"type": "mode", "value": "real"}))
+        deadline = time.monotonic() + 3
+        echoed = None
+        while time.monotonic() < deadline and echoed is None:
+            msg = json.loads(await asyncio.wait_for(sock.recv(), timeout=3))
+            if msg.get("type") == "mode":
+                echoed = msg
+        assert echoed == {"type": "mode", "value": "sim"}
     print("ok  live sim broadcasts cars and serves the overlay")
+
+
+async def _until(sock, predicate, timeout: float):
+    deadline = time.monotonic() + timeout
+    last = None
+    while time.monotonic() < deadline:
+        msg = json.loads(await asyncio.wait_for(sock.recv(), timeout=timeout))
+        last = msg
+        if predicate(msg):
+            return msg
+    raise AssertionError("timed out, last message: " + json.dumps(last))
 
 
 async def hardware_stub(port: int) -> None:
@@ -180,11 +206,36 @@ async def hardware_stub(port: int) -> None:
     async with connect(f"ws://127.0.0.1:{port}") as sock:
         hello = json.loads(await asyncio.wait_for(sock.recv(), timeout=3))
         assert hello["mode"] == "real"
+        assert hello["source"] == "real"
+        await _until(sock, lambda msg: msg.get("type") == "nav", 2)
         try:
-            raw = await asyncio.wait_for(sock.recv(), timeout=1.2)
+            raw = await asyncio.wait_for(sock.recv(), timeout=0.4)
         except asyncio.TimeoutError:
             raw = None
         assert raw is None or json.loads(raw).get("type") != "car"
+
+        await sock.send(json.dumps({"type": "mode", "value": "sim"}))
+        await _until(sock, lambda msg: msg.get("type") == "mode" and msg.get("value") == "sim", 2)
+        car = await _until(sock, lambda msg: msg.get("type") == "car", 8)
+        assert str(car["id"]).startswith("c")
+        await _until(sock, lambda msg: msg.get("type") == "nav", 2)
+
+        await sock.send(json.dumps({"type": "mode", "value": "real"}))
+        await _until(sock, lambda msg: msg.get("type") == "mode" and msg.get("value") == "real", 2)
+        drain_until = time.monotonic() + 0.35
+        while time.monotonic() < drain_until:
+            try:
+                await asyncio.wait_for(sock.recv(), timeout=drain_until - time.monotonic())
+            except asyncio.TimeoutError:
+                break
+        saw_nav = False
+        deadline = time.monotonic() + 1.2
+        while time.monotonic() < deadline:
+            msg = json.loads(await asyncio.wait_for(sock.recv(), timeout=1.2))
+            assert msg.get("type") != "car", msg
+            if msg.get("type") == "nav":
+                saw_nav = True
+        assert saw_nav
     print("ok  hardware stub stays quiet when the radar SDK is absent")
 
 

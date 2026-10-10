@@ -72,7 +72,38 @@
     letter-spacing: 0.14em;
     font-size: 22px;
   }
-  .sub { color: var(--muted); font-size: 12px; letter-spacing: 0.16em; margin-top: 2px; }
+  .sub {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    color: var(--muted);
+    font-size: 12px;
+    letter-spacing: 0.16em;
+    margin-top: 6px;
+  }
+  .mode-switch {
+    display: inline-flex;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    overflow: hidden;
+    background: #0c0f14;
+  }
+  .mode-switch button {
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    color: var(--muted);
+    padding: 4px 10px;
+    min-height: 0;
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+  }
+  .mode-switch button[aria-pressed="true"] {
+    background: var(--ink);
+    color: #14181f;
+  }
   #status.live { color: #9dcaa8; }
   #status.down { color: #ff8d8d; }
   .scoreblock { text-align: right; }
@@ -427,7 +458,7 @@
     .meta { display: none; }
     footer { justify-content: stretch; }
     .keys { width: 100%; display: grid; grid-template-columns: 1fr 1fr; }
-    button { min-height: 52px; justify-content: center; }
+    .keys button { min-height: 52px; justify-content: center; }
   }
   body[data-ring="left"] #ring-right,
   body[data-ring="right"] #ring-left { display: none; }
@@ -450,7 +481,13 @@
     <header>
       <div>
         <h1>HAPTIC RIDE</h1>
-        <div class="sub"><span id="status">LINKING</span> · INTERFACE</div>
+        <div class="sub">
+          <span id="status">LINKING</span>
+          <span class="mode-switch" role="group" aria-label="Car source">
+            <button type="button" id="mode-sim" aria-pressed="false">Simulated</button>
+            <button type="button" id="mode-real" aria-pressed="false">Real</button>
+          </span>
+        </div>
       </div>
       <div class="scoreblock">
         <div id="score" class="num" aria-label="score">0</div>
@@ -569,11 +606,26 @@ let toastN = -1;
 let audioOn = false;
 let audioCtx = null;
 let sawState = false;
+let bridgeMode = "";
+let source = "";
+
+function setSource(value) {
+  if (value !== "sim" && value !== "real") return;
+  const changed = source !== "" && source !== value;
+  source = value;
+  document.getElementById("mode-sim").setAttribute("aria-pressed", value === "sim" ? "true" : "false");
+  document.getElementById("mode-real").setAttribute("aria-pressed", value === "real" ? "true" : "false");
+  if (changed) cars.clear();
+  if (document.getElementById("status").classList.contains("live")) setStatus(true);
+  paintRadar();
+}
 
 function setStatus(ok, mode) {
+  if (mode) bridgeMode = mode;
   const el = document.getElementById("status");
-  const label = mode === "real" ? "HARDWARE" : mode === "synthetic" ? "SYNTHETIC" : "FAKE BRIDGE";
-  el.textContent = ok ? label : "RECONNECTING";
+  const kind = bridgeMode === "real" ? "HARDWARE" : bridgeMode === "synthetic" ? "SYNTHETIC" : bridgeMode === "fake" ? "FAKE BRIDGE" : "LINKING";
+  const src = source === "sim" ? "SIMULATED" : source === "real" ? "REAL" : "";
+  el.textContent = ok ? (src ? kind + " · " + src : kind) : "RECONNECTING";
   el.classList.toggle("live", ok);
   el.classList.toggle("down", !ok);
 }
@@ -695,7 +747,8 @@ function paintRadar() {
     dot.appendChild(label);
     layer.appendChild(dot);
   }
-  document.getElementById("car-count").textContent = list.length ? "REAR · " + list.length + " CAR" + (list.length > 1 ? "S" : "") : "REAR RADAR";
+  const idle = source === "sim" ? "SIMULATED" : "REAR RADAR";
+  document.getElementById("car-count").textContent = list.length ? "REAR · " + list.length + " CAR" + (list.length > 1 ? "S" : "") : idle;
 }
 
 function paintScore(score, combo) {
@@ -796,8 +849,14 @@ function onBuzz(msg) {
 }
 
 function onMsg(msg) {
-  if (msg.type === "hello") setStatus(true, msg.mode);
-  else if (msg.type === "state") onState(msg);
+  if (msg.type === "hello") {
+    if (msg.source === "sim" || msg.source === "real") setSource(msg.source);
+    else setSource(msg.mode === "fake" ? "sim" : "real");
+    setStatus(true, msg.mode);
+  } else if (msg.type === "mode") {
+    setSource(msg.value);
+    setStatus(true);
+  } else if (msg.type === "state") onState(msg);
   else if (msg.type === "buzz") onBuzz(msg);
   else if (msg.type === "car" && !sawState) {
     cars.set(msg.id || msg.side, msg);
@@ -819,6 +878,9 @@ function connect() {
     try { onMsg(JSON.parse(ev.data)); } catch (err) { /* ignore bad frames */ }
   };
 }
+
+document.getElementById("mode-sim").addEventListener("click", () => send({ type: "mode", value: "sim" }));
+document.getElementById("mode-real").addEventListener("click", () => send({ type: "mode", value: "real" }));
 
 document.querySelector(".keys").addEventListener("click", (ev) => {
   const btn = ev.target.closest("button");

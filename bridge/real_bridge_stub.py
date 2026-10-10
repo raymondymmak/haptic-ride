@@ -27,6 +27,7 @@ import time
 from pathlib import Path
 
 import radar_filter
+from fake_bridge import TICK_S, simulate
 from hub import Hub, add_server_args, lan_ip, serve_overlay
 from radar_filter import (
     CLOSING_MPS,
@@ -77,6 +78,20 @@ def save_background(path: Path, tracker: RangeTracker) -> None:
     print(f"radar  saved background → {path}", flush=True)
 
 
+def make_tracker(ranges, args) -> RangeTracker:
+    return RangeTracker(
+        ranges,
+        bg_frames=args.bg_frames,
+        bg_alpha=args.bg_alpha,
+        threshold_k=args.threshold_k,
+        min_range_m=args.min_range_m,
+        persist_frames=args.persist,
+        smooth_frames=args.smooth,
+        max_step_m=args.max_step_m,
+        min_approach=args.min_approach,
+    )
+
+
 def car_message(side: str, reading: dict) -> dict:
     return {
         "type": "car",
@@ -98,22 +113,30 @@ def report(side: str, tracker: RangeTracker, reading: dict | None) -> None:
 
 
 async def emit(hub: Hub, side: str, tracker: RangeTracker, reading: dict | None) -> None:
+    if reading is not None and hub.source != "real":
+        print(
+            f"radar  held   {side:5}  {reading['dist']:5.2f} m  {reading['speed']:+5.2f} m/s",
+            flush=True,
+        )
+        return
     report(side, tracker, reading)
     if reading is not None:
         await hub.broadcast(car_message(side, reading))
 
 
+def apply_source(hub: Hub, value: str) -> str:
+    """Overlay control. sim plays the scripted cars; real returns to the radar."""
+    if value not in ("sim", "real"):
+        return hub.source
+    if value != hub.source:
+        label = "simulated cars" if value == "sim" else "radar"
+        print(f"mode   {value}  ({label})", flush=True)
+    return value
+
+
 async def run_synthetic(hub: Hub, args) -> None:
     ranges = range_axis(args.max_range_m, args.range_resolution_m)
-    tracker = RangeTracker(
-        ranges,
-        bg_frames=args.bg_frames,
-        threshold_k=args.threshold_k,
-        min_range_m=args.min_range_m,
-        persist_frames=args.persist,
-        smooth_frames=args.smooth,
-        max_step_m=args.max_step_m,
-    )
+    tracker = make_tracker(ranges, args)
     dt = 1.0 / args.frame_rate
     t = 0.0
     print("radar  synthetic — calibrating on an empty scene with a static 4.7 m peak", flush=True)
@@ -235,15 +258,7 @@ async def run_device(hub: Hub, args) -> None:
             while True:
                 await asyncio.sleep(2)
         if tracker is None:
-            tracker = RangeTracker(
-                item["ranges"],
-                bg_frames=args.bg_frames,
-                threshold_k=args.threshold_k,
-                min_range_m=args.min_range_m,
-                persist_frames=args.persist,
-                smooth_frames=args.smooth,
-                max_step_m=args.max_step_m,
-            )
+            tracker = make_tracker(item["ranges"], args)
             if cache and same_axis(cache["ranges"], item["ranges"]):
                 tracker.background = [float(v) for v in cache["background"]]
                 print(
@@ -307,13 +322,15 @@ def banner(args) -> None:
     print(f"  overlay     http://127.0.0.1:{args.http_port}", flush=True)
     print(f"  websocket   ws://{ip}:{args.port}", flush=True)
     print(f"  cars        side={args.side}  read_radar()", flush=True)
+    print("  route       nav cues stay on; overlay can switch cars to Simulated", flush=True)
     print("  rings       play_buzz() still a TODO", flush=True)
     print("", flush=True)
 
 
 async def amain(args) -> None:
-    hub = Hub(mode="synthetic" if args.synthetic else "real")
+    hub = Hub(mode="synthetic" if args.synthetic else "real", source="real")
     hub.on_buzz = play_buzz
+    hub.on_mode = lambda value: apply_source(hub, value)
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -329,10 +346,14 @@ async def amain(args) -> None:
 
     try:
         async with serve(hub.handler, args.host, args.port):
-            task = asyncio.create_task(read_radar(hub, args))
+            radar_task = asyncio.create_task(read_radar(hub, args))
+            route_task = asyncio.create_task(
+                simulate(hub, None, TICK_S, emit_cars=lambda: hub.source == "sim")
+            )
             await stop.wait()
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+            radar_task.cancel()
+            route_task.cancel()
+            await asyncio.gather(radar_task, route_task, return_exceptions=True)
     except OSError as exc:
         raise SystemExit(f"websocket port {args.port} is already in use ({exc})") from exc
 
@@ -345,11 +366,23 @@ def main() -> None:
     parser.add_argument("--recalibrate", action="store_true", help="ignore the saved empty-scene average and measure again")
     parser.add_argument("--bg-file", type=Path, default=DEFAULT_BG, help="cached empty-scene magnitude")
     parser.add_argument("--bg-frames", type=int, default=radar_filter.BG_FRAMES)
+    parser.add_argument(
+        "--bg-alpha",
+        type=float,
+        default=radar_filter.BG_ALPHA,
+        help="EMA rate for bins with no approaching target (0 freezes the background)",
+    )
     parser.add_argument("--threshold-k", type=float, default=radar_filter.THRESHOLD_K, help="peak must exceed k × the median bin")
     parser.add_argument("--min-range-m", type=float, default=radar_filter.MIN_RANGE_M)
     parser.add_argument("--persist", type=int, default=radar_filter.PERSIST_FRAMES, help="consecutive frames before a target is real")
     parser.add_argument("--smooth", type=int, default=radar_filter.SMOOTH_FRAMES, help="median window for distance")
     parser.add_argument("--max-step-m", type=float, default=radar_filter.MAX_STEP_M, help="jump larger than this starts a new target")
+    parser.add_argument(
+        "--min-approach",
+        type=float,
+        default=radar_filter.MIN_APPROACH_MPS,
+        help="minimum closing speed, in m/s, before a peak is a car",
+    )
     parser.add_argument("--frame-rate", type=float, default=FRAME_RATE_HZ)
     parser.add_argument("--if-gain", dest="if_gain_db", type=int, default=IF_GAIN_DB, help="33–45 worked; higher is louder")
     parser.add_argument("--rx-mask", type=int, default=RX_MASK, help="1 = one RX antenna")
