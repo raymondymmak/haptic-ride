@@ -32,9 +32,11 @@ probed with the same address loop.
 Playback uses the sample's calls: VibrationMode.MANUAL, play_frequency,
 stop_vibration, set_led, set_led_off, activate_thermal_intensity_control,
 disable_all_thermal. LEDs are scaled by --led-brightness (default 0.15).
-turn_soon is a soft amber flash, turn_now a brighter amber double flash,
-car_approach red, blue_shell pulsing blue. combo is a triple tap with no LED.
-The LED goes off when the pattern ends. BLE is the C# stack and is not used here.
+turn_soon and turn_now share one amber. Soon holds that color as a steady
+glow for about 1.2 s with one pulse. Now blinks it about five times at 6 Hz
+with a pulse on each blink. car_approach is red, blue_shell pulsing blue.
+combo is a triple tap with no LED. The LED goes off when the pattern ends.
+BLE is the C# stack and is not used here.
 """
 
 from __future__ import annotations
@@ -63,8 +65,11 @@ APPROACH_HZ_HI = 250.0
 TURN_SOON_HZ = 130.0
 TURN_NOW_HZ = 180.0
 TURN_SOON_S = 0.12
-TURN_NOW_ON_S = 0.09
-TURN_NOW_GAP_S = 0.06
+# Longer than the engine's 0.45 s resend, so a held turn_soon stays lit.
+TURN_SOON_GLOW_S = 1.2
+# 5 blinks at 6 Hz, on and off equal, at the --led-brightness cap.
+TURN_NOW_BLINKS = 5
+TURN_NOW_BLINK_HZ = 6.0
 BLUE_SHELL_HZ = 240.0
 BLUE_SHELL_PULSES = 8
 COMBO_HZ = 200.0
@@ -86,8 +91,8 @@ AMBER_SOFT_GAIN = 1.0
 AMBER = (255, 230, 0)
 BLUE_PULSE = (0, 72, 255)
 LED_NOTE = {
-    "turn_soon": "soft amber flash",
-    "turn_now": "brighter amber double flash",
+    "turn_soon": "slow amber glow",
+    "turn_now": "rapid amber blink",
     "car_approach": "red",
     "blue_shell": "pulsing blue",
     "combo": "triple tap, no LED",
@@ -769,25 +774,28 @@ async def show_led(chain: Output, red: int, green: int, blue: int, gain: float =
 
 
 async def pattern_turn_soon(chain: Output, intensity: float) -> None:
-    """One short pulse and a soft amber flash."""
+    """One short pulse. The same amber stays on as a slow steady glow."""
     await chain.thermal_off()
     await show_led(chain, *AMBER_SOFT, AMBER_SOFT_GAIN)
     await chain.manual(clamp(intensity), TURN_SOON_HZ)
     await asyncio.sleep(TURN_SOON_S)
+    await chain.manual(0.0, TURN_SOON_HZ)
+    await asyncio.sleep(max(0.0, TURN_SOON_GLOW_S - TURN_SOON_S))
     await chain.led_off()
 
 
 async def pattern_turn_now(chain: Output, intensity: float) -> None:
-    """Double pulse with a brighter amber flash on each tap."""
+    """Rapid pulses, one per amber blink, at the --led-brightness cap."""
     await chain.thermal_off()
     gain = clamp(intensity)
-    for _ in range(2):
+    half = 0.5 / TURN_NOW_BLINK_HZ
+    for _ in range(TURN_NOW_BLINKS):
         await show_led(chain, *AMBER)
         await chain.manual(gain, TURN_NOW_HZ)
-        await asyncio.sleep(TURN_NOW_ON_S)
+        await asyncio.sleep(half)
         await chain.led_off()
         await chain.manual(0.0, TURN_NOW_HZ)
-        await asyncio.sleep(TURN_NOW_GAP_S)
+        await asyncio.sleep(half)
 
 
 async def pattern_car_approach(chain: Output, intensity: float) -> None:

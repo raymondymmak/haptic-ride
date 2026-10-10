@@ -226,12 +226,12 @@ Playback calls are the ones in that sample: `registers.set_vibration_mode(Vibrat
 
 Patterns are asyncio tasks. A newer buzz for a wrist cancels the one already playing there. `both` drives both wrists. When a pattern finishes, and it is still the latest command for that wrist, the dot goes idle: `stop_vibration()` (intensity 0), `set_led_off()`, thermal off.
 
-Every LED is dim. `--led-brightness` (0 to 1, default `0.15`) scales the RGB channels, so the brightest channel is about 38/255. The flag is the global cap. A soft cue uses less of that cap than a bright one.
+Every LED is dim. `--led-brightness` (0 to 1, default `0.15`) scales the RGB channels, so the brightest channel is about 38/255. `turn_soon` and `turn_now` use the same amber, `(255, 230, 0)` at that cap. Timing is what separates them. Soon is a steady glow held for about 1.2 s. Now blinks that amber five times at 6 Hz.
 
 | Pattern | Feel |
 | --- | --- |
-| `turn_soon` | One short pulse, soft amber flash |
-| `turn_now` | Double pulse, brighter amber flash on each tap |
+| `turn_soon` | One short pulse. Amber LED holds a steady glow for about 1.2 s, then turns off |
+| `turn_now` | Rapid pulses, one per blink. Same amber, five blinks at about 6 Hz, at the `--led-brightness` cap |
 | `car_approach` | Continuous vibration. Intensity and frequency (100–250 Hz) rise with `intensity`. Dim red LED, brighter as `intensity` rises |
 | `blue_shell` | Strong rapid rumble, a blue pulse on each tick, plus heat (`ThermalMode.MANUAL`) when `device.py` exposes it |
 | `combo` | Quick triple tap. No LED |

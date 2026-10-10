@@ -123,7 +123,12 @@ def check_map(rings) -> None:
     assert rings.approach_frequency(0.64) == 196
     assert rings.dim_channel(255, 0.15) == 38
     assert rings.dim_rgb(255, 0, 0, 0.15, 0.64) == (24, 0, 0)
-    assert rings.dim_rgb(*rings.AMBER, 0.15)[0] > rings.dim_rgb(*rings.AMBER_SOFT, 0.15, rings.AMBER_SOFT_GAIN)[0]
+    assert rings.AMBER_SOFT == (255, 230, 0) and rings.AMBER_SOFT_GAIN == 1.0
+    assert rings.AMBER == rings.AMBER_SOFT
+    soon_color = rings.dim_rgb(*rings.AMBER_SOFT, 0.15, rings.AMBER_SOFT_GAIN)
+    assert rings.dim_rgb(*rings.AMBER, 0.15) == soon_color
+    assert rings.TURN_SOON_GLOW_S >= 1.0
+    assert rings.TURN_NOW_BLINKS >= 4 and rings.TURN_NOW_BLINK_HZ == 6.0
     assert rings.shell_heat(1) == 1
     print("ok  discovered addresses 2 and 4 map to left and right")
 
@@ -184,6 +189,40 @@ async def check_override(rings) -> None:
     assert [event for event in events if event[0] == "right" and event[1] == "idle"] == [("right", "idle")]
     assert [event for event in events if event[0] == "left" and event[1] == "idle"] == [("left", "idle")]
     print("ok  a newer buzz overrides one wrist and still idles")
+
+
+async def check_turn_cues(rings) -> None:
+    """Same amber. Soon is one pulse and a long glow. Now blinks and pulses rapidly."""
+    amber = rings.dim_rgb(*rings.AMBER, 0.15)
+    events: list = []
+    player = rings.Player({"left": Rec("left", events), "right": Rec("right", events)})
+
+    started = time.monotonic()
+    await player.play("left", "turn_soon", 0.45)
+    await player.wait("left")
+    soon_s = time.monotonic() - started
+    assert soon_s >= rings.TURN_SOON_GLOW_S - 0.05, soon_s
+    leds = [event for event in events if event[1] == "led"]
+    offs = [event for event in events if event[1] == "led_off"]
+    pulses = [event for event in events if event[1] == "vib" and event[2] > 0]
+    assert leds == [("left", "led", *amber)], leds
+    assert len(offs) == 1
+    assert len(pulses) == 1
+
+    events.clear()
+    started = time.monotonic()
+    await player.play("left", "turn_now", 0.9)
+    await player.wait("left")
+    now_s = time.monotonic() - started
+    assert now_s < soon_s
+    leds = [event for event in events if event[1] == "led"]
+    offs = [event for event in events if event[1] == "led_off"]
+    pulses = [event for event in events if event[1] == "vib" and event[2] > 0]
+    assert len(leds) == rings.TURN_NOW_BLINKS
+    assert len(offs) == rings.TURN_NOW_BLINKS
+    assert all(event[2:] == amber for event in leds)
+    assert len(pulses) == rings.TURN_NOW_BLINKS
+    print("ok  turn_soon glows and turn_now blinks the same amber")
 
 
 class Proc:
@@ -254,14 +293,20 @@ def check_test_flag(rings) -> None:
     assert "play_frequency  MANUAL" in text
     assert "frequency=196" in text
     assert "triple tap, no LED" in text
-    assert "soft amber flash" in text and "pulsing blue" in text
-    soon = rings.dim_rgb(*rings.AMBER_SOFT, rings.DEFAULT_LED_BRIGHTNESS, rings.AMBER_SOFT_GAIN)
+    assert "slow amber glow" in text and "rapid amber blink" in text and "pulsing blue" in text
     amber = rings.dim_rgb(*rings.AMBER, rings.DEFAULT_LED_BRIGHTNESS)
+    soon = rings.dim_rgb(*rings.AMBER_SOFT, rings.DEFAULT_LED_BRIGHTNESS, rings.AMBER_SOFT_GAIN)
+    assert soon == amber
     blue = rings.dim_rgb(*rings.BLUE_PULSE, rings.DEFAULT_LED_BRIGHTNESS)
     red = rings.dim_rgb(255, 0, 0, rings.DEFAULT_LED_BRIGHTNESS, 0.64)
-    for color in (soon, amber, blue, red):
+    amber_line = f"set_led  {amber[0]},{amber[1]},{amber[2]}"
+    for color in (amber, blue, red):
         assert f"set_led  {color[0]},{color[1]},{color[2]}" in text
         assert max(color) <= 40
+    soon_left = text[text.find("TEST LEFT turn_soon"):text.find("TEST RIGHT turn_soon")]
+    now_left = text[text.find("TEST LEFT turn_now"):text.find("TEST RIGHT turn_now")]
+    assert soon_left.count(amber_line) == 1
+    assert now_left.count(amber_line) == rings.TURN_NOW_BLINKS
     assert "set_led  0,255,0" not in text
     assert "set_led  0,38,0" not in text
     assert "activate_thermal_intensity_control  1.00" in text
@@ -357,6 +402,7 @@ def main() -> None:
     check_ports(rings)
     check_map(rings)
     asyncio.run(check_override(rings))
+    asyncio.run(check_turn_cues(rings))
     check_test_flag(rings)
     check_bridge()
     print("ok  datafeel rings")
