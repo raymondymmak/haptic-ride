@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Hardware bridge. Radar input is the BGT60TR13C distance FFT; rings are still a TODO.
+"""Hardware bridge. Radar input is the BGT60TR13C distance FFT.
+
+Buzz commands are logged and rebroadcast. The DataFeel dots are driven by
+rings/datafeel_rings.py on the machine the El Jefe modules are plugged into,
+not by this process.
 
 The Windows VM that owns the USB kit:
 
@@ -292,26 +296,27 @@ async def read_radar(hub: Hub, args) -> None:
 
 
 async def play_buzz(cmd: dict) -> None:
-    """Play one buzz on the Genki Wave rings or a DataFeel devkit.
+    """Log one buzz. rings/datafeel_rings.py is what actually plays it.
 
-    TODO — this is the only place that should touch the actuators.
-    `cmd` is already validated:
+    No-op on the actuators, on purpose. This process may be the Windows VM
+    that owns the radar dongle. The El Jefe modules (one per wrist, or one
+    chain) stay on the Mac, and the ring client subscribes to this same
+    websocket. `cmd` is already validated:
 
         side       "left" | "right" | "both"
         pattern    turn_soon | turn_now | car_approach | blue_shell | combo
         intensity  float 0..1
 
-    Feel the team can aim for:
-
-        turn_soon      soft pulses, about 2 Hz, gain = intensity
-        turn_now       hard double-tap
-        car_approach   steady rumble, amplitude follows intensity
-        blue_shell     fast staccato at full strength
-        combo          short rising burst, usually both rings
-
-    The hub has already printed this command.
+    The hub has already printed the command. This line is the reminder that
+    output lives in the ring client.
     """
-    _ = cmd
+    side = str(cmd.get("side", "?"))
+    pattern = str(cmd.get("pattern", "?"))
+    try:
+        intensity = float(cmd.get("intensity", 0))
+    except (TypeError, ValueError):
+        intensity = 0.0
+    print(f"rings  client plays  {side:5}  {pattern:13}  {intensity:.2f}", flush=True)
 
 
 def banner(args) -> None:
@@ -323,7 +328,7 @@ def banner(args) -> None:
     print(f"  websocket   ws://{ip}:{args.port}", flush=True)
     print(f"  cars        side={args.side}  read_radar()", flush=True)
     print("  route       nav cues stay on; overlay can switch cars to Simulated", flush=True)
-    print("  rings       play_buzz() still a TODO", flush=True)
+    print("  rings       log only — run rings/datafeel_rings.py on the El Jefe machine", flush=True)
     print("", flush=True)
 
 

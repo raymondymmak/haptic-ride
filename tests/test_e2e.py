@@ -297,6 +297,7 @@ def main() -> None:
         asyncio.run(hardware_stub(8773))
         text = "".join(stub.lines)
         assert "read_radar" in text
+        assert "datafeel_rings" in text
     except Exception:
         for proc in procs:
             print("--- process output ---")

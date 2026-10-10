@@ -40,28 +40,28 @@ python bridge/fake_bridge.py
 python engine/game.py
 ```
 
-Headless check (scoring rules, replay, live sim, record, hardware stub, radar filter):
+Headless check (scoring rules, replay, live sim, record, hardware stub, radar filter, DataFeel dry-run):
 
 ```bash
 python tests/test_e2e.py
 python tests/test_radar_filter.py
+python tests/test_datafeel_rings.py
 ```
 
 ## Architecture
 
 ```text
  overlay (browser)  ←——ws——→  bridge  ←——ws——→  game engine
- rings, radar, keys          the bus            score + which buzz
-                             fake now,
-                             radar + rings later
+ phone rings                 the bus            score + which buzz
+ DataFeel ring client        fake or radar
 ```
 
-The bridge is a dumb hub. It owns the hardware, rebroadcasts every JSON message to the other clients, and prints buzz commands. The game engine is the only place that scores or picks a pattern. The overlay draws and, on a phone, vibrates. Run **one** game engine on the LAN or two of them will both buzz.
+The bridge is a dumb hub. It rebroadcasts every JSON message and prints buzz commands. The game engine is the only place that scores or picks a pattern. The DataFeel ring client is the only place that drives the dots. The overlay draws and, on a phone, vibrates. Run **one** game engine on the LAN or two of them will both buzz.
 
 ```text
-car, nav                  bridge  →  game, overlay
+car, nav                  bridge  →  game, overlay, ring client
 shoulder_check, turn      overlay →  game          (later: ring IMU)
-buzz                      game    →  bridge, overlay
+buzz                      game    →  bridge, overlay, ring client
 state                     game    →  overlay
 hello                     bridge  →  whoever just connected
 mode                      overlay →  bridge → everyone
@@ -162,7 +162,7 @@ Until the kit is on a bike, everyone uses the fake bridge.
 1. Demo laptop runs `./run.sh` (bridge + the one game engine + the overlay).
 2. Other laptops and phones open `http://<demo-laptop>:8641`. They do not run a second engine.
 3. Someone hacking the engine runs **only** `python engine/game.py --url ws://<bridge>:8765` and stops the engine on the bridge machine first.
-4. When the kit is on the Windows VM, that VM runs the real bridge (below) and the Mac runs the one game engine. Do not also run `./run.sh` or a second engine.
+4. When the kit is on the Windows VM, that VM runs the real bridge (below) and the Mac runs the one game engine. Do not also run `./run.sh` or a second engine. The Mac with the El Jefe modules also runs `rings/datafeel_rings.py` against the VM's websocket. The bridge only logs buzzes.
 
 There is no auth. Keep it on the hackathon LAN.
 
@@ -207,7 +207,103 @@ python bridge/real_bridge_stub.py --synthetic
 
 IF gain 33–45 is the range that worked. Raising max range, resolution, speed, or the RX count makes a bigger frame and the kit returns `IFX_ERROR_FRAME_ACQUISITION_FAILED` over USB passthrough.
 
-`play_buzz()` is still the open hook for the Genki Wave rings or a DataFeel devkit. The hub already validates and prints every buzz.
+`play_buzz()` logs the buzz and does not open a serial port. Output is the ring client in the next section. The hub already validates and prints every buzz.
+
+## DataFeel rings
+
+The dots hang off El Jefe on the 5-pin cable. El Jefe talks to the laptop over USB-C serial (Silicon Labs CP210x). The client uses the same Python entry as `samples/read_write.py`:
+
+```python
+from datafeel.device import VibrationMode, discover_devices, LedMode, ThermalMode, VibrationWaveforms
+devices = discover_devices(4)
+```
+
+Addresses are whatever answers that scan. A kit at the event showed one El Jefe on `/dev/cu.usbserial-210`, nothing at address 1, and a dot at address 2 (the other dot on that chain is the other address that answers, often 4). The client does not assume 1 and 2. On one port the lowest address that answers is LEFT and the next is RIGHT. `--left-addr` and `--right-addr` override that pair. `--swap` exchanges the wrists. Startup prints the discovered map.
+
+A second CP210x port, if one is plugged in, is the other wrist. Port names are sorted (`usbserial-20` before `usbserial-110`, `COM3` before `COM10`) and every dot discovered on that chain plays for that wrist. `discover_devices()` stops after the first port, so the second port is walked with the same address loop. `--port` forces a single chain even if another adapter is present.
+
+Playback calls are the ones in that sample: `registers.set_vibration_mode(VibrationMode.MANUAL)`, `play_frequency(hz, intensity)`, `stop_vibration()`, `set_led(r, g, b)`, `set_led_off()`, `activate_thermal_intensity_control(heat)`, `disable_all_thermal()`. BLE is the C# stack and this client does not use it.
+
+Patterns are asyncio tasks. A newer buzz for a wrist cancels the one already playing there. `both` drives both wrists. When a pattern finishes, and it is still the latest command for that wrist, the dot goes idle: `stop_vibration()` (intensity 0), LED off, thermal off.
+
+| Pattern | Feel |
+| --- | --- |
+| `turn_soon` | One short pulse |
+| `turn_now` | Double pulse |
+| `car_approach` | Continuous vibration. Intensity and frequency (100–250 Hz) rise with `intensity`. Red global LED |
+| `blue_shell` | Strong rapid rumble, plus heat (`ThermalMode.MANUAL`) when `device.py` exposes it |
+| `combo` | Quick triple tap, green global LED |
+
+On two El Jefe modules, every dot that answered on that chain gets the wrist's pattern. On one chain, LEFT is the lowest address and RIGHT is the next.
+
+### Setup
+
+`requirements.txt` installs `websockets` and `pyserial`. The DataFeel package is not on PyPI.
+
+1. Install the CP210x driver if the port does not appear.
+   - macOS: `/dev/cu.SLAB_USBtoUART` or `/dev/cu.usbserial-*` (use the `cu.` node, not `tty.`)
+   - Windows: a `COMx` port. Driver: https://www.silabs.com/documents/public/software/CP210x_Windows_Drivers.zip
+2. Clone the SDK and install the Python package from the `Python` folder (the one with `setup.py`):
+
+```bash
+git clone https://github.com/DataFeel/devkit-samples.git
+cd devkit-samples/Python
+pip install .
+```
+
+Windows: `py -m pip install .` from that folder. macOS: `pip3 install .` if `pip` is not Python 3. That pulls `pyserial` and `minimalmodbus`.
+
+3. From this repo, against a bridge that is already running (`python3` on macOS, `py` or `python` on Windows):
+
+```bash
+pip install -r requirements.txt
+python3 rings/datafeel_rings.py --url ws://127.0.0.1:8765
+```
+
+Ports are auto-detected (CP210x VID `10C4` / PID `EA60`, the check inside `discover_devices`, or a `SLAB_USBtoUART` / `usbserial` name). The scan is addresses 1 through `--max-address` (default 4, same as the sample). The process prints each miss (`No device at address 1`) and then the map:
+
+```text
+found DataFeel Device on port /dev/cu.usbserial-210
+found 2 devices
+Dot 2 (Name = DataFeel Dot V6, ...)
+  one El Jefe /dev/cu.usbserial-210; discovered addresses 2, 4; lowest is left, next is right
+  LEFT   /dev/cu.usbserial-210  dots=2
+  RIGHT  /dev/cu.usbserial-210  dots=4
+```
+
+```bash
+python3 rings/datafeel_rings.py --port /dev/cu.usbserial-210
+python3 rings/datafeel_rings.py --left-addr 2 --right-addr 4
+python3 rings/datafeel_rings.py --swap
+python3 rings/datafeel_rings.py --left-port /dev/cu.usbserial-110 --right-port /dev/cu.usbserial-210
+python3 rings/datafeel_rings.py --port COM5
+```
+
+Without the dots, print the frames the hardware would get:
+
+```bash
+python3 rings/datafeel_rings.py --dry-run --url ws://127.0.0.1:8765
+```
+
+Cycle every pattern on the LEFT wrist, then the RIGHT, with no bridge. The first two buzzes are a mapping check (one long pulse, then two pulses):
+
+```bash
+python3 rings/datafeel_rings.py --test
+python3 rings/datafeel_rings.py --test --dry-run
+```
+
+On the demo laptop the fake bridge and the ring client can share a machine:
+
+```bash
+./run.sh
+python3 rings/datafeel_rings.py --url ws://127.0.0.1:8765
+```
+
+With the radar on the Windows VM, point the client at the VM (`play_buzz()` there only logs):
+
+```bash
+python3 rings/datafeel_rings.py --url ws://VM_IP:8765
+```
 
 ## Demo loop
 
@@ -233,12 +329,14 @@ Crop the browser over the bike shot. The edge of the screen glows on the buzzing
 
 ```text
 bridge/fake_bridge.py        sim, record, replay, overlay HTTP
-bridge/real_bridge_stub.py   radar or scripted cars, nav in both, ring TODO
-bridge/radar_filter.py      background, threshold, persistence
+bridge/real_bridge_stub.py   radar or scripted cars, nav in both, buzz log only
+bridge/radar_filter.py       background, threshold, persistence
 bridge/hub.py                WebSocket fan-out
 engine/game.py               haptics + score
+rings/datafeel_rings.py      DataFeel dots, one chain or two El Jefe
 overlay/index.html           the HUD, one file
 examples/short.jsonl         tiny replay
 run.sh                       venv, bridge, engine
 tests/test_e2e.py            headless end-to-end check
+tests/test_datafeel_rings.py port map, patterns, dry-run against the fake bridge
 ```

@@ -1,8 +1,9 @@
 """WebSocket hub shared by the fake bridge and the hardware stub.
 
 Every client speaks the same JSON protocol. A message from one client is
-forwarded to the others. The bridge is the only process that should own the
-radar and the rings; the game engine and the overlay are just clients.
+forwarded to the others. The bridge publishes radar (or the scripted route)
+and logs buzz commands. The game engine is the only process that scores.
+rings/datafeel_rings.py is the process that drives the DataFeel dots.
 """
 
 from __future__ import annotations
