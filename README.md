@@ -40,12 +40,13 @@ python bridge/fake_bridge.py
 python engine/game.py
 ```
 
-Headless check (scoring rules, replay, live sim, record, hardware stub, radar filter, DataFeel dry-run):
+Headless check (scoring rules, replay, live sim, record, hardware stub, radar filter, DataFeel dry-run, camera boxes):
 
 ```bash
 python tests/test_e2e.py
 python tests/test_radar_filter.py
 python tests/test_datafeel_rings.py
+python tests/test_camera_bridge.py
 ```
 
 ## Architecture
@@ -53,7 +54,7 @@ python tests/test_datafeel_rings.py
 ```text
  overlay (browser)  ←——ws——→  bridge  ←——ws——→  game engine
  phone rings                 the bus            score + which buzz
- DataFeel ring client        fake or radar
+ DataFeel ring client        fake, radar, or camera
 ```
 
 The bridge is a dumb hub. It rebroadcasts every JSON message and prints buzz commands. The game engine is the only place that scores or picks a pattern. The DataFeel ring client is the only place that drives the dots. The overlay draws and, on a phone, vibrates. Run **one** game engine on the LAN or two of them will both buzz.
@@ -209,6 +210,51 @@ IF gain 33–45 is the range that worked. Raising max range, resolution, speed, 
 
 `play_buzz()` logs the buzz and does not open a serial port. Output is the ring client in the next section. The hub already validates and prints every buzz.
 
+## Camera bridge (Mac)
+
+Indoors the radar invents targets that jump between about 1 m, 5 m, and 7 m. `bridge/camera_bridge.py` is the fallback. It runs on the demo Mac (Apple Silicon, Python 3.13), opens a webcam or Continuity Camera, and publishes the same `car` events on the same ports (`8765` / `8641`). The engine, the overlay, and the ring client stay as they are. **Real** is the camera. **Simulated** swaps in the scripted cars from `fake_bridge.py`. Turn cues keep running in both.
+
+Stop `./run.sh` first. It uses ports 8765 and 8641.
+
+The detector is ultralytics YOLO (`yolo11n.pt` by default, `yolov8n.pt` if you pass `--model`). The device is MPS when PyTorch reports it, and CPU if MPS is missing or a call fails. Classes are person, bicycle, car, motorcycle, bus, and truck. The first launch downloads the weights.
+
+Side comes from the box center. The frame is split into thirds (`--left-zone` 0.33, `--right-zone` 0.67). The camera faces backward, so the picture is mirrored by default (`--mirror` / `--no-mirror`) and image-left is the rider's left. A box in the center third shows up in `--preview` only. Each side publishes its nearest qualifying target. If two are within 0.5 m, the one closing faster wins.
+
+Distance is `cal / (bbox height / frame height)`, in meters. The default `cal` is the distance at which that class would fill the frame vertically (a rough 50° webcam): car 3.2, person 3.6, bicycle 2.4, motorcycle 2.6, bus 6.4, truck 6.0. Measure one object at a known distance and set `cal = distance × height_fraction`. Speed is `(previous distance − distance) / frame time`, positive when the box is growing. A car is published only after 3 consecutive frames in which it is closing at `--min-approach` (0.4 m/s) or already inside `--near` (6 m).
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install -r requirements.txt
+python3 bridge/camera_bridge.py --list-cameras
+python3 bridge/camera_bridge.py --camera 0 --preview
+```
+
+Continuity Camera shows up as one of the indexes from `--list-cameras`. macOS will ask the terminal for camera permission. `q` closes the preview window and stops the bridge.
+
+Two more terminals, same venv, once the bridge is up:
+
+```bash
+source .venv/bin/activate
+python3 engine/game.py --url ws://127.0.0.1:8765
+```
+
+```bash
+source .venv/bin/activate
+python3 rings/datafeel_rings.py --url ws://127.0.0.1:8765
+```
+
+Open [http://127.0.0.1:8641](http://127.0.0.1:8641). Phones use `http://<mac-ip>:8641`.
+
+```bash
+python3 bridge/camera_bridge.py --camera 1 --preview
+python3 bridge/camera_bridge.py --camera 0 --preview --no-mirror
+python3 bridge/camera_bridge.py --camera 0 --preview --cal car=4.0,person=3.5
+python3 bridge/camera_bridge.py --synthetic
+```
+
+`--synthetic` needs no camera and no model. It drives the tracker with boxes and is what `python3 tests/test_camera_bridge.py` runs.
+
 ## DataFeel rings
 
 The dots hang off El Jefe on the 5-pin cable. El Jefe talks to the laptop over USB-C serial (Silicon Labs CP210x). The client uses the same Python entry as `samples/read_write.py`:
@@ -333,6 +379,7 @@ Crop the browser over the bike shot. The edge of the screen glows on the buzzing
 ```text
 bridge/fake_bridge.py        sim, record, replay, overlay HTTP
 bridge/real_bridge_stub.py   radar or scripted cars, nav in both, buzz log only
+bridge/camera_bridge.py      webcam fallback, same hub and mode toggle
 bridge/radar_filter.py       background, threshold, persistence
 bridge/hub.py                WebSocket fan-out
 engine/game.py               haptics + score
@@ -342,4 +389,5 @@ examples/short.jsonl         tiny replay
 run.sh                       venv, bridge, engine
 tests/test_e2e.py            headless end-to-end check
 tests/test_datafeel_rings.py port map, patterns, dry-run against the fake bridge
+tests/test_camera_bridge.py  synthetic boxes, persistence, mode toggle
 ```
