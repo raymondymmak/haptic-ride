@@ -1,0 +1,8 @@
+.venv/
+.vendor/
+__pycache__/
+*.pyc
+logs/*.jsonl
+logs/radar_background.json
+*.log
+.DS_Store

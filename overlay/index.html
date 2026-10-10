@@ -1,0 +1,848 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#08090d">
+<title>Haptic Ride</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=Outfit:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #08090d;
+    --panel: #10131a;
+    --ink: #f3f0ea;
+    --muted: #9aa196;
+    --line: rgba(243, 240, 234, 0.1);
+    --left: #7fdfff;
+    --right: #ffc56b;
+    --gold: #ffe08a;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    color: var(--ink);
+    background:
+      radial-gradient(ellipse at 50% 110%, rgba(255, 176, 32, 0.08), transparent 42%),
+      var(--bg);
+    font-family: Outfit, "Avenir Next", "Segoe UI", sans-serif;
+    user-select: none;
+    overflow: hidden;
+  }
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    background-image:
+      linear-gradient(rgba(255,255,255,0.035) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,0.035) 1px, transparent 1px);
+    background-size: 56px 56px;
+    mask-image: radial-gradient(ellipse at 50% 45%, #000 15%, transparent 72%);
+  }
+  .glow {
+    position: fixed;
+    top: 0; bottom: 0;
+    width: min(30vw, 380px);
+    pointer-events: none;
+    opacity: 0;
+    z-index: 0;
+  }
+  .glow-l { left: 0; background: linear-gradient(90deg, var(--c, transparent), transparent 78%); }
+  .glow-r { right: 0; background: linear-gradient(270deg, var(--c, transparent), transparent 78%); }
+
+  .app {
+    position: relative;
+    z-index: 1;
+    height: 100%;
+    display: grid;
+    grid-template-rows: auto auto minmax(0, 1fr) auto;
+    gap: 12px;
+    padding: 16px 20px 14px;
+  }
+  header, .coach, footer { display: flex; align-items: center; }
+  header { justify-content: space-between; gap: 16px; }
+  h1 {
+    margin: 0;
+    font-family: "Chakra Petch", "Avenir Next Condensed", sans-serif;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    font-size: 22px;
+  }
+  .sub { color: var(--muted); font-size: 12px; letter-spacing: 0.16em; margin-top: 2px; }
+  #status.live { color: #9dcaa8; }
+  #status.down { color: #ff8d8d; }
+  .scoreblock { text-align: right; }
+  #score {
+    font-family: "Chakra Petch", sans-serif;
+    font-weight: 700;
+    font-size: clamp(42px, 6vw, 68px);
+    line-height: 0.85;
+    letter-spacing: 0.02em;
+    color: var(--gold);
+  }
+  #score.pop { animation: pop 0.28s ease-out; }
+  .combo-row {
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    gap: 8px;
+    margin-top: 4px;
+    color: var(--muted);
+    font-size: 12px;
+    letter-spacing: 0.16em;
+  }
+  #combo {
+    font-family: "Chakra Petch", sans-serif;
+    color: var(--ink);
+    font-size: 18px;
+    letter-spacing: 0;
+  }
+  .pips { display: flex; gap: 4px; }
+  .pips i {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: rgba(255,255,255,0.16);
+    display: block;
+  }
+  .pips i.on { background: #ff8a3d; box-shadow: 0 0 8px #ff8a3d; }
+
+  .coach {
+    min-height: 24px;
+    color: var(--ink);
+    letter-spacing: 0.04em;
+    font-size: 15px;
+  }
+  #phone-banner {
+    margin-left: auto;
+    color: var(--muted);
+    font-size: 12px;
+    letter-spacing: 0.04em;
+  }
+
+  .play {
+    min-height: 0;
+    display: grid;
+    grid-template-columns: minmax(150px, 200px) minmax(0, 1fr) minmax(150px, 200px);
+    gap: 16px;
+  }
+  .ring {
+    --i: 0;
+    --c: #7fdfff;
+    position: relative;
+    display: grid;
+    place-items: center;
+    border-radius: 28px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    overflow: hidden;
+  }
+  .halo {
+    position: absolute;
+    inset: 16px;
+    border-radius: 50%;
+    background: conic-gradient(var(--c) calc(var(--i) * 1turn), rgba(255,255,255,0.07) 0);
+    -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 12px), #000 calc(100% - 10px));
+    mask: radial-gradient(farthest-side, transparent calc(100% - 12px), #000 calc(100% - 10px));
+    opacity: calc(0.4 + var(--i) * 0.6);
+  }
+  .ring.on { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--c) 55%, transparent), 0 0 48px color-mix(in srgb, var(--c) 28%, transparent); }
+  .ring.pat-turn_now .halo { animation: pulse 0.32s ease-in-out infinite; }
+  .ring.pat-turn_soon .halo { animation: pulse 1.15s ease-in-out infinite; }
+  .ring.pat-car_approach .halo { animation: pulse 0.55s ease-in-out infinite; }
+  .ring.pat-blue_shell .halo { animation: spin 0.8s linear infinite; }
+  .core { position: relative; text-align: center; padding: 12px; }
+  .which {
+    font-size: 11px;
+    letter-spacing: 0.18em;
+    color: var(--muted);
+  }
+  .pat {
+    font-family: "Chakra Petch", sans-serif;
+    font-weight: 700;
+    font-size: 22px;
+    letter-spacing: 0.06em;
+    margin-top: 6px;
+  }
+  .inten {
+    font-family: "Chakra Petch", sans-serif;
+    font-size: 28px;
+    margin-top: 2px;
+  }
+  .badge {
+    display: inline-block;
+    margin-top: 8px;
+    background: #ff3355;
+    color: white;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    padding: 4px 8px;
+    border-radius: 999px;
+    animation: pulse 0.8s ease-in-out infinite;
+  }
+
+  .scene {
+    position: relative;
+    min-height: 0;
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr);
+    gap: 10px;
+  }
+  .nav {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 8px 16px;
+  }
+  .arrow { color: var(--muted); display: grid; }
+  .nav.turn-left .arrow { transform: scaleX(-1); }
+  .nav.turn_soon .arrow { color: #ffb020; }
+  .nav.turn_now .arrow { color: #ff4d1a; animation: pulse 0.34s ease-in-out infinite; }
+  .phase {
+    font-size: 12px;
+    letter-spacing: 0.2em;
+    color: var(--muted);
+  }
+  .nav.turn_now .phase { color: #ff4d1a; }
+  .meters {
+    font-family: "Chakra Petch", sans-serif;
+    font-weight: 700;
+    font-size: clamp(36px, 5vw, 60px);
+    line-height: 0.9;
+  }
+  .turn-name { color: var(--muted); letter-spacing: 0.12em; font-size: 13px; }
+
+  .radar {
+    position: relative;
+    border-radius: 18px;
+    overflow: hidden;
+    background:
+      radial-gradient(ellipse at 50% 0%, rgba(127, 223, 255, 0.14), transparent 46%),
+      linear-gradient(#141820, #0c0e13);
+    border: 1px solid var(--line);
+  }
+  .lane {
+    position: absolute;
+    left: 50%;
+    top: 18%;
+    bottom: 8%;
+    width: 2px;
+    transform: translateX(-50%);
+    background: repeating-linear-gradient(#f3f0ea 0 8px, transparent 8px 22px);
+    opacity: 0.22;
+    animation: drive 0.55s linear infinite;
+  }
+  .cone {
+    position: absolute;
+    left: 16%; right: 16%; top: 16%; bottom: 6%;
+    background: linear-gradient(rgba(127, 223, 255, 0.02), rgba(127, 223, 255, 0.1));
+    clip-path: polygon(50% 0, 100% 100%, 0 100%);
+  }
+  .sweep {
+    position: absolute;
+    left: 50%;
+    top: 16%;
+    width: 2px;
+    height: 68%;
+    background: linear-gradient(transparent, rgba(140, 220, 255, 0.85));
+    transform-origin: top center;
+    animation: sweep 2.8s ease-in-out infinite;
+  }
+  .rider {
+    position: absolute;
+    left: 50%;
+    top: 8%;
+    width: 42px;
+    height: 42px;
+    transform: translateX(-50%);
+    z-index: 2;
+    filter: drop-shadow(0 3px 4px rgba(0,0,0,0.65));
+  }
+  .ticks {
+    position: absolute;
+    left: 10px;
+    top: 22%;
+    bottom: 10%;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    color: var(--muted);
+    font-size: 11px;
+    letter-spacing: 0.08em;
+  }
+  .radar-label {
+    position: absolute;
+    right: 12px;
+    bottom: 10px;
+    color: var(--muted);
+    font-size: 11px;
+    letter-spacing: 0.16em;
+  }
+  #dots { position: absolute; inset: 0; }
+  .dot {
+    position: absolute;
+    width: 14px; height: 14px;
+    margin: -7px 0 0 -7px;
+    border-radius: 50%;
+    background: #ff3355;
+    box-shadow: 0 0 14px #ff3355;
+    transition: top 0.12s linear, left 0.12s linear;
+    z-index: 2;
+  }
+  .dot span {
+    position: absolute;
+    left: 18px; top: -2px;
+    font-family: "Chakra Petch", sans-serif;
+    font-size: 12px;
+    color: var(--ink);
+    white-space: nowrap;
+  }
+  .dot.blue {
+    background: #4d8dff;
+    box-shadow: 0 0 16px #4d8dff;
+    border-radius: 2px;
+    transform: rotate(45deg);
+  }
+  .dot.blue span { transform: rotate(-45deg); display: inline-block; }
+  .dot.near { width: 18px; height: 18px; margin: -9px 0 0 -9px; }
+
+  .toast {
+    position: absolute;
+    left: 50%;
+    top: 58%;
+    transform: translate(-50%, -50%);
+    text-align: center;
+    pointer-events: none;
+    z-index: 4;
+    text-shadow: 0 2px 16px rgba(0,0,0,0.65);
+  }
+  .toast:empty { display: none; }
+  .toast.show { animation: slam 0.42s cubic-bezier(.2, 1.4, .4, 1) both; }
+  .toast-title {
+    font-family: "Chakra Petch", sans-serif;
+    font-weight: 700;
+    font-size: clamp(28px, 4vw, 52px);
+    letter-spacing: 0.04em;
+  }
+  .toast-pts {
+    font-family: "Chakra Petch", sans-serif;
+    font-size: clamp(18px, 2.4vw, 32px);
+  }
+  .toast.item { color: var(--gold); }
+  .toast.dodge { color: #9ebcff; }
+  .toast.drift { color: #ff8a4a; }
+  .toast.shell, .toast.miss { color: #ff6d78; }
+  .toast.whiff .toast-title, .toast.early .toast-title, .toast.wrong .toast-title { font-size: 26px; }
+  .toast.whiff, .toast.early, .toast.wrong { color: #d9d3c7; }
+
+  footer { gap: 16px; justify-content: space-between; }
+  .keys { display: flex; flex-wrap: wrap; gap: 8px; }
+  button {
+    appearance: none;
+    border: 1px solid var(--line);
+    background: var(--panel);
+    color: var(--ink);
+    border-radius: 12px;
+    padding: 8px 12px 8px 8px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font: inherit;
+    letter-spacing: 0.04em;
+    cursor: pointer;
+  }
+  button:focus-visible { outline: 2px solid var(--left); outline-offset: 2px; }
+  kbd {
+    font-family: "Chakra Petch", sans-serif;
+    min-width: 28px;
+    height: 28px;
+    display: grid;
+    place-items: center;
+    border-radius: 8px;
+    background: #1b2029;
+    border: 1px solid rgba(255,255,255,0.12);
+  }
+  button.hot { border-color: #ffb020; box-shadow: 0 0 0 1px #ffb020; }
+  button.pressed { transform: translateY(1px); background: #1c2430; }
+  .meta { text-align: right; min-width: 0; }
+  #pills { color: var(--muted); font-size: 12px; letter-spacing: 0.08em; margin-bottom: 4px; }
+  #feed {
+    font-family: "Chakra Petch", ui-monospace, monospace;
+    font-size: 12px;
+    line-height: 1.45;
+    color: #8fb89a;
+    user-select: text;
+  }
+  #feed div:last-child { color: #e7fff0; }
+
+  body.shake { animation: shake 0.4s linear; }
+  body.combo .ring .halo { filter: brightness(1.4); }
+
+  @keyframes pulse {
+    0%, 100% { transform: scale(1); }
+    50% { transform: scale(1.04); }
+  }
+  .nav.turn-left.turn_now .arrow { animation: pulse-left 0.34s ease-in-out infinite; }
+  @keyframes pulse-left {
+    0%, 100% { transform: scaleX(-1) scale(1); }
+    50% { transform: scaleX(-1) scale(1.06); }
+  }
+  @keyframes spin { to { transform: rotate(1turn); } }
+  @keyframes drive { to { background-position: 0 22px; } }
+  @keyframes sweep {
+    0% { transform: rotate(-32deg); opacity: 0.25; }
+    50% { opacity: 1; }
+    100% { transform: rotate(32deg); opacity: 0.25; }
+  }
+  @keyframes slam {
+    0% { opacity: 0; transform: translate(-50%, -60%) scale(0.7); filter: blur(4px); }
+    100% { opacity: 1; transform: translate(-50%, -50%) scale(1); filter: blur(0); }
+  }
+  @keyframes pop {
+    0% { transform: scale(1); }
+    40% { transform: scale(1.08); }
+    100% { transform: scale(1); }
+  }
+  @keyframes shake {
+    0%, 100% { transform: translateX(0); }
+    20% { transform: translateX(-7px); }
+    40% { transform: translateX(7px); }
+    60% { transform: translateX(-4px); }
+    80% { transform: translateX(4px); }
+  }
+
+  @media (max-width: 820px) {
+    body { overflow: auto; height: auto; }
+    .app { height: auto; min-height: 100%; padding: 12px; }
+    .play { grid-template-columns: 1fr 1fr; }
+    .scene { grid-column: 1 / -1; min-height: 48vh; order: -1; }
+    .ring { min-height: 180px; }
+    #feed { display: none; }
+    .meta { display: none; }
+    footer { justify-content: stretch; }
+    .keys { width: 100%; display: grid; grid-template-columns: 1fr 1fr; }
+    button { min-height: 52px; justify-content: center; }
+  }
+  body[data-ring="left"] #ring-right,
+  body[data-ring="right"] #ring-left { display: none; }
+  body[data-ring="left"] .play,
+  body[data-ring="right"] .play { grid-template-columns: 1fr; }
+  body[data-ring="left"] .scene,
+  body[data-ring="right"] .scene { order: 2; min-height: 34vh; }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation: none !important;
+      transition: none !important;
+    }
+  }
+</style>
+</head>
+<body>
+  <div class="glow glow-l" id="glow-left"></div>
+  <div class="glow glow-r" id="glow-right"></div>
+  <div class="app">
+    <header>
+      <div>
+        <h1>HAPTIC RIDE</h1>
+        <div class="sub"><span id="status">LINKING</span> · INTERFACE</div>
+      </div>
+      <div class="scoreblock">
+        <div id="score" class="num" aria-label="score">0</div>
+        <div class="combo-row"><span>COMBO</span><b id="combo">0</b><span class="pips" id="pips"></span></div>
+      </div>
+    </header>
+    <div class="coach">
+      <div id="coach">Linking to the bridge…</div>
+      <div id="phone-banner" hidden></div>
+    </div>
+    <div class="play">
+      <aside class="ring" id="ring-left">
+        <div class="halo"></div>
+        <div class="core">
+          <div class="which">LEFT RING</div>
+          <div class="pat" id="pat-left">QUIET</div>
+          <div class="inten" id="int-left">0.00</div>
+          <div class="badge" id="badge-left" hidden>CHECK</div>
+        </div>
+      </aside>
+      <section class="scene">
+        <div class="nav" id="nav">
+          <div class="arrow" id="arrow" aria-hidden="true">
+            <svg width="68" height="68" viewBox="0 0 72 72">
+              <path d="M14 36h34M38 18l18 18-18 18" fill="none" stroke="currentColor" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </div>
+          <div>
+            <div class="phase" id="phase">OPEN ROAD</div>
+            <div class="meters" id="meters">—</div>
+            <div class="turn-name" id="turn-name">no cue yet</div>
+          </div>
+        </div>
+        <div class="radar" id="radar">
+          <div class="cone"></div>
+          <div class="lane"></div>
+          <div class="sweep"></div>
+          <div class="rider" aria-hidden="true">
+            <svg width="42" height="42" viewBox="0 0 48 48">
+              <path d="M24 2 L44 45 L24 35 L4 45 Z" fill="#f4f1ea" stroke="#ffe08a" stroke-width="2" stroke-linejoin="round"/>
+            </svg>
+          </div>
+          <div class="ticks"><span>close</span><span>15m</span><span>far</span></div>
+          <div id="dots"></div>
+          <div class="radar-label" id="car-count">REAR RADAR</div>
+          <div class="toast" id="toast" aria-live="assertive"></div>
+        </div>
+      </section>
+      <aside class="ring" id="ring-right">
+        <div class="halo"></div>
+        <div class="core">
+          <div class="which">RIGHT RING</div>
+          <div class="pat" id="pat-right">QUIET</div>
+          <div class="inten" id="int-right">0.00</div>
+          <div class="badge" id="badge-right" hidden>CHECK</div>
+        </div>
+      </aside>
+    </div>
+    <footer>
+      <div class="keys">
+        <button type="button" data-act="check-left" id="k-check-left"><kbd>A</kbd><span>check left</span></button>
+        <button type="button" data-act="check-right" id="k-check-right"><kbd>D</kbd><span>check right</span></button>
+        <button type="button" data-act="turn-left" id="k-turn-left"><kbd>←</kbd><span>turn left</span></button>
+        <button type="button" data-act="turn-right" id="k-turn-right"><kbd>→</kbd><span>turn right</span></button>
+        <button type="button" id="sound" aria-pressed="false"><kbd>M</kbd><span>sound off</span></button>
+      </div>
+      <div class="meta">
+        <div id="pills">items 0 · dodges 0 · drifts 0</div>
+        <div id="feed"></div>
+      </div>
+    </footer>
+  </div>
+<script>
+const LABEL = {
+  turn_soon: "SOON",
+  turn_now: "NOW",
+  car_approach: "CAR",
+  blue_shell: "SHELL",
+  combo: "COMBO",
+};
+const COLOR = {
+  turn_soon: "#ffb020",
+  turn_now: "#ff4d1a",
+  car_approach: "#ff3355",
+  blue_shell: "#4d8dff",
+  combo: "#ffe08a",
+};
+const VIBE = {
+  turn_soon: [30, 110, 30],
+  turn_now: [80, 50, 80, 50, 140],
+  blue_shell: [16, 22, 16, 22, 16, 22, 16, 22, 180],
+  combo: [36, 28, 36, 28, 36, 28, 160],
+};
+
+const params = new URLSearchParams(location.search);
+const focus = (params.get("ring") || "both").toLowerCase();
+if (focus === "left" || focus === "right") {
+  document.body.dataset.ring = focus;
+  const banner = document.getElementById("phone-banner");
+  banner.hidden = false;
+  banner.textContent = "This phone is the " + focus.toUpperCase() + " ring. Android Chrome vibrates; iPhone shows the pattern.";
+}
+
+let wsPort = params.get("ws") || "__WS_PORT__";
+if (!/^\d+$/.test(wsPort)) wsPort = "8765";
+const wsURL = params.get("url") || ("ws://" + location.hostname + ":" + wsPort);
+
+const cars = new Map();
+const rings = { left: null, right: null };
+let lastChecks = [];
+const lastVibe = { left: 0, right: 0, both: 0 };
+const lastBuzzLog = {};
+let socket = null;
+let retry = 400;
+let toastN = -1;
+let audioOn = false;
+let audioCtx = null;
+let sawState = false;
+
+function setStatus(ok, mode) {
+  const el = document.getElementById("status");
+  const label = mode === "real" ? "HARDWARE" : mode === "synthetic" ? "SYNTHETIC" : "FAKE BRIDGE";
+  el.textContent = ok ? label : "RECONNECTING";
+  el.classList.toggle("live", ok);
+  el.classList.toggle("down", !ok);
+}
+
+function logLine(text) {
+  const box = document.getElementById("feed");
+  const row = document.createElement("div");
+  row.textContent = text;
+  box.appendChild(row);
+  while (box.children.length > 6) box.removeChild(box.firstChild);
+}
+
+function send(msg) {
+  if (!socket || socket.readyState !== 1) return;
+  socket.send(JSON.stringify(msg));
+}
+
+function act(name) {
+  if (name === "check-left") send({ type: "shoulder_check", side: "left" });
+  if (name === "check-right") send({ type: "shoulder_check", side: "right" });
+  if (name === "turn-left") send({ type: "turn", turn: "left" });
+  if (name === "turn-right") send({ type: "turn", turn: "right" });
+  if (name.startsWith("check")) logLine("check " + name.split("-")[1]);
+  if (name.startsWith("turn")) logLine("turn " + name.split("-")[1]);
+  const btn = document.getElementById("k-" + name);
+  if (!btn) return;
+  btn.classList.add("pressed");
+  setTimeout(() => btn.classList.remove("pressed"), 140);
+}
+
+function toggleSound() {
+  audioOn = !audioOn;
+  const btn = document.getElementById("sound");
+  btn.setAttribute("aria-pressed", audioOn ? "true" : "false");
+  btn.querySelector("span").textContent = audioOn ? "sound on" : "sound off";
+  if (audioOn) {
+    audioCtx = audioCtx || new AudioContext();
+    audioCtx.resume();
+  }
+}
+
+function blip(pattern) {
+  if (!audioOn) return;
+  const ctx = audioCtx || new AudioContext();
+  audioCtx = ctx;
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  const freq = { turn_soon: 520, turn_now: 740, car_approach: 160, blue_shell: 90, combo: 880 };
+  osc.frequency.value = freq[pattern] || 330;
+  osc.type = pattern === "blue_shell" || pattern === "car_approach" ? "square" : "sine";
+  gain.gain.value = 0.045;
+  osc.connect(gain).connect(ctx.destination);
+  osc.start();
+  osc.stop(ctx.currentTime + (pattern === "blue_shell" ? 0.09 : 0.05));
+}
+
+function vibrate(side, msg) {
+  if (focus !== "both" && side !== "both" && side !== focus) return;
+  const key = side === "both" ? "both" : side;
+  const now = performance.now();
+  if (now - (lastVibe[key] || 0) < 420) return;
+  lastVibe[key] = now;
+  blip(msg.pattern);
+  if (!navigator.vibrate) return;
+  let pattern = VIBE[msg.pattern];
+  if (msg.pattern === "car_approach") {
+    pattern = [Math.round(40 + Number(msg.intensity || 0) * 150)];
+  }
+  if (pattern) navigator.vibrate(pattern);
+}
+
+function paintRing(side, checks) {
+  const cmd = rings[side];
+  const root = document.getElementById("ring-" + side);
+  const pat = cmd ? cmd.pattern : "";
+  root.className = "ring" + (pat ? " on pat-" + pat : "");
+  root.style.setProperty("--i", cmd ? String(cmd.intensity) : "0");
+  const color = COLOR[pat] || (side === "left" ? "#7fdfff" : "#ffc56b");
+  root.style.setProperty("--c", color);
+  document.getElementById("pat-" + side).textContent = pat ? LABEL[pat] : "QUIET";
+  document.getElementById("int-" + side).textContent = cmd ? Number(cmd.intensity).toFixed(2) : "0.00";
+  document.getElementById("badge-" + side).hidden = !(checks || []).includes(side);
+  const glow = document.getElementById("glow-" + side);
+  glow.style.opacity = cmd ? String(Math.min(0.95, 0.12 + Number(cmd.intensity) * 0.8)) : "0";
+  glow.style.setProperty("--c", color);
+}
+
+function paintNav(nav) {
+  const box = document.getElementById("nav");
+  if (!nav) {
+    box.className = "nav";
+    document.getElementById("phase").textContent = "OPEN ROAD";
+    document.getElementById("meters").textContent = "—";
+    document.getElementById("turn-name").textContent = "no cue yet";
+    return;
+  }
+  const phase = nav.phase || "far";
+  box.className = "nav " + phase + " turn-" + nav.turn;
+  document.getElementById("phase").textContent = phase === "turn_now" ? "NOW" : phase === "turn_soon" ? "SOON" : "AHEAD";
+  document.getElementById("meters").textContent = Math.max(0, Math.round(nav.in_m)) + "m";
+  document.getElementById("turn-name").textContent = nav.turn.toUpperCase() + " TURN";
+}
+
+function paintRadar() {
+  const layer = document.getElementById("dots");
+  layer.replaceChildren();
+  const list = [...cars.values()];
+  for (const car of list) {
+    const dot = document.createElement("div");
+    const dist = Math.max(0, Math.min(32, Number(car.dist) || 0));
+    dot.className = "dot" + (car.blue ? " blue" : "") + (dist < 8 ? " near" : "");
+    let hash = 0;
+    for (const ch of String(car.id || car.side)) hash = (hash * 33 + ch.charCodeAt(0)) % 5;
+    const x = (car.side === "left" ? 36 : 64) + (hash - 2) * 3.4;
+    dot.style.top = (16 + (dist / 32) * 74) + "%";
+    dot.style.left = x + "%";
+    const label = document.createElement("span");
+    label.textContent = dist.toFixed(0) + "m";
+    dot.appendChild(label);
+    layer.appendChild(dot);
+  }
+  document.getElementById("car-count").textContent = list.length ? "REAR · " + list.length + " CAR" + (list.length > 1 ? "S" : "") : "REAR RADAR";
+}
+
+function paintScore(score, combo) {
+  const el = document.getElementById("score");
+  const text = Math.round(score).toLocaleString("en-US");
+  if (el.textContent !== text) {
+    el.textContent = text;
+    el.classList.remove("pop");
+    void el.offsetWidth;
+    el.classList.add("pop");
+  }
+  document.getElementById("combo").textContent = String(combo || 0);
+  const pips = document.getElementById("pips");
+  pips.replaceChildren();
+  for (let i = 0; i < 8; i++) {
+    const pip = document.createElement("i");
+    if (i < Math.min(8, combo || 0)) pip.className = "on";
+    pips.appendChild(pip);
+  }
+}
+
+function paintFlash(flash) {
+  const el = document.getElementById("toast");
+  if (!flash) {
+    el.className = "toast";
+    el.replaceChildren();
+    return;
+  }
+  if (flash.n === toastN) return;
+  toastN = flash.n;
+  el.className = "toast show " + (flash.kind || "");
+  el.replaceChildren();
+  const title = document.createElement("div");
+  title.className = "toast-title";
+  title.textContent = flash.text;
+  el.appendChild(title);
+  if (flash.pts) {
+    const pts = document.createElement("div");
+    pts.className = "toast-pts";
+    pts.textContent = "+" + flash.pts;
+    el.appendChild(pts);
+  }
+  logLine((flash.pts ? "+" + flash.pts + " " : "") + flash.text);
+  if (flash.kind === "shell") {
+    document.body.classList.remove("shake");
+    void document.body.offsetWidth;
+    document.body.classList.add("shake");
+  }
+}
+
+function paintHot(checks, needTurn, nav) {
+  for (const side of ["left", "right"]) {
+    document.getElementById("k-check-" + side).classList.toggle("hot", (checks || []).includes(side));
+    const turnHot = !!(needTurn && nav && nav.turn === side);
+    document.getElementById("k-turn-" + side).classList.toggle("hot", turnHot);
+  }
+}
+
+function onState(msg) {
+  sawState = true;
+  cars.clear();
+  for (const car of msg.cars || []) cars.set(car.id, car);
+  rings.left = msg.rings ? msg.rings.left : null;
+  rings.right = msg.rings ? msg.rings.right : null;
+  lastChecks = msg.check || [];
+  paintScore(msg.score || 0, msg.combo || 0);
+  paintNav(msg.nav);
+  paintRadar();
+  paintRing("left", lastChecks);
+  paintRing("right", lastChecks);
+  paintFlash(msg.flash);
+  paintHot(msg.check, msg.need_turn, msg.nav);
+  if (msg.coach) document.getElementById("coach").textContent = msg.coach;
+  const stats = msg.stats || {};
+  document.getElementById("pills").textContent =
+    "items " + (stats.items || 0) + "  ·  dodges " + (stats.dodges || 0) + "  ·  drifts " + (stats.drifts || 0);
+}
+
+function onBuzz(msg) {
+  if (msg.pattern === "combo") {
+    document.body.classList.add("combo");
+    setTimeout(() => document.body.classList.remove("combo"), 450);
+    vibrate("both", msg);
+    logLine("buzz both combo 1.00");
+    return;
+  }
+  if (msg.side === "left" || msg.side === "right") {
+    rings[msg.side] = { pattern: msg.pattern, intensity: msg.intensity };
+    paintRing(msg.side, lastChecks);
+  }
+  vibrate(msg.side, msg);
+  const prev = lastBuzzLog[msg.side];
+  const intensity = Number(msg.intensity);
+  if (!prev || prev.pattern !== msg.pattern || Math.abs(prev.intensity - intensity) >= 0.1) {
+    lastBuzzLog[msg.side] = { pattern: msg.pattern, intensity };
+    logLine("buzz " + msg.side + " " + msg.pattern + " " + intensity.toFixed(2));
+  }
+}
+
+function onMsg(msg) {
+  if (msg.type === "hello") setStatus(true, msg.mode);
+  else if (msg.type === "state") onState(msg);
+  else if (msg.type === "buzz") onBuzz(msg);
+  else if (msg.type === "car" && !sawState) {
+    cars.set(msg.id || msg.side, msg);
+    paintRadar();
+  } else if (msg.type === "nav" && !sawState) {
+    paintNav({ turn: msg.turn, in_m: msg.in_m, phase: msg.in_m <= 12 ? "turn_now" : msg.in_m <= 45 ? "turn_soon" : "far" });
+  }
+}
+
+function connect() {
+  socket = new WebSocket(wsURL);
+  socket.onopen = () => { retry = 400; };
+  socket.onclose = () => {
+    setStatus(false);
+    setTimeout(connect, retry);
+    retry = Math.min(2000, retry * 1.5);
+  };
+  socket.onmessage = (ev) => {
+    try { onMsg(JSON.parse(ev.data)); } catch (err) { /* ignore bad frames */ }
+  };
+}
+
+document.querySelector(".keys").addEventListener("click", (ev) => {
+  const btn = ev.target.closest("button");
+  if (!btn) return;
+  if (btn.id === "sound") { toggleSound(); return; }
+  act(btn.dataset.act);
+});
+
+window.addEventListener("keydown", (ev) => {
+  if (ev.repeat) return;
+  const key = ev.key.toLowerCase();
+  if (key === "m") { toggleSound(); ev.preventDefault(); return; }
+  const map = { a: "check-left", d: "check-right", arrowleft: "turn-left", arrowright: "turn-right" };
+  const name = map[key];
+  if (!name) return;
+  ev.preventDefault();
+  act(name);
+});
+
+for (let i = 0; i < 8; i++) {
+  const pip = document.createElement("i");
+  document.getElementById("pips").appendChild(pip);
+}
+connect();
+</script>
+</body>
+</html>

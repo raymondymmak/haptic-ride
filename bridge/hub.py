@@ -1,0 +1,143 @@
+"""WebSocket hub shared by the fake bridge and the hardware stub.
+
+Every client speaks the same JSON protocol. A message from one client is
+forwarded to the others. The bridge is the only process that should own the
+radar and the rings; the game engine and the overlay are just clients.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import socket
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+OVERLAY = ROOT / "overlay" / "index.html"
+
+PATTERNS = {"turn_soon", "turn_now", "car_approach", "blue_shell", "combo"}
+BUZZ_SIDES = {"left", "right", "both"}
+
+
+def lan_ip() -> str:
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        probe.connect(("8.8.8.8", 80))
+        return probe.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+    finally:
+        probe.close()
+
+
+class Hub:
+    def __init__(self, mode: str):
+        self.mode = mode
+        self.clients: set = set()
+        self.on_buzz = None
+        self._lock = asyncio.Lock()
+        self._buzz_log: dict[str, tuple] = {}
+
+    async def broadcast(self, msg: dict, exclude=None) -> None:
+        raw = json.dumps(msg, separators=(",", ":"))
+        async with self._lock:
+            dead = []
+            for ws in list(self.clients):
+                if ws is exclude:
+                    continue
+                try:
+                    await ws.send(raw)
+                except Exception:
+                    dead.append(ws)
+            for ws in dead:
+                self.clients.discard(ws)
+
+    def log_buzz(self, msg: dict) -> None:
+        side = str(msg.get("side", "?"))
+        pattern = str(msg.get("pattern", "?"))
+        try:
+            intensity = round(float(msg.get("intensity", 0)), 2)
+        except (TypeError, ValueError):
+            intensity = 0.0
+        now = time.monotonic()
+        prev = self._buzz_log.get(side)
+        if prev and prev[0] == pattern and abs(prev[1] - intensity) < 0.08 and now - prev[2] < 0.5:
+            return
+        self._buzz_log[side] = (pattern, intensity, now)
+        print(f"buzz  {side:5}  {pattern:13}  {intensity:.2f}", flush=True)
+
+    def _accept_buzz(self, msg: dict) -> bool:
+        if msg.get("pattern") not in PATTERNS or msg.get("side") not in BUZZ_SIDES:
+            return False
+        try:
+            msg["intensity"] = round(max(0.0, min(1.0, float(msg.get("intensity", 0)))), 2)
+        except (TypeError, ValueError):
+            return False
+        return True
+
+    async def handler(self, ws) -> None:
+        self.clients.add(ws)
+        who = getattr(ws, "remote_address", "?")
+        print(f"join   {who}  ({len(self.clients)} on the bus)", flush=True)
+        try:
+            await ws.send(json.dumps({"type": "hello", "role": "bridge", "mode": self.mode}))
+            async for raw in ws:
+                try:
+                    msg = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(msg, dict) or "type" not in msg:
+                    continue
+                if msg["type"] == "buzz":
+                    if not self._accept_buzz(msg):
+                        continue
+                    self.log_buzz(msg)
+                    if self.on_buzz is not None:
+                        await self.on_buzz(msg)
+                await self.broadcast(msg, exclude=ws)
+        finally:
+            self.clients.discard(ws)
+            print(f"leave  {who}  ({len(self.clients)} on the bus)", flush=True)
+
+
+def serve_overlay(host: str, http_port: int, ws_port: int) -> None:
+    page = OVERLAY.read_bytes()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            path = self.path.split("?", 1)[0]
+            if path == "/favicon.ico":
+                self.send_response(204)
+                self.end_headers()
+                return
+            if path not in ("/", "/index.html"):
+                self.send_error(404)
+                return
+            body = page.replace(b"__WS_PORT__", str(ws_port).encode())
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, fmt: str, *args) -> None:
+            return
+
+    class Server(ThreadingHTTPServer):
+        allow_reuse_address = True
+
+    try:
+        httpd = Server((host, http_port), Handler)
+    except OSError as exc:
+        raise SystemExit(f"overlay port {http_port} is already in use ({exc})") from exc
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+
+
+def add_server_args(parser) -> None:
+    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--port", type=int, default=8765, help="WebSocket port")
+    parser.add_argument("--http-port", type=int, default=8641, help="overlay HTTP port")
