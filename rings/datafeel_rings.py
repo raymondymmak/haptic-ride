@@ -81,9 +81,9 @@ TEST_INTENSITY = {
 # Full-scale colors. dim_rgb multiplies by --led-brightness (default 0.15),
 # so the brightest channel is about 38/255.
 DEFAULT_LED_BRIGHTNESS = 0.15
-AMBER_SOFT = (255, 140, 0)
-AMBER_SOFT_GAIN = 0.55
-AMBER = (255, 180, 0)
+AMBER_SOFT = (255, 210, 0)
+AMBER_SOFT_GAIN = 0.8
+AMBER = (255, 230, 0)
 BLUE_PULSE = (0, 72, 255)
 LED_NOTE = {
     "turn_soon": "soft amber flash",
