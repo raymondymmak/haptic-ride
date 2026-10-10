@@ -121,7 +121,9 @@ def check_map(rings) -> None:
     assert rings.approach_frequency(0) == 100
     assert rings.approach_frequency(1) == 250
     assert rings.approach_frequency(0.64) == 196
-    assert rings.led_level(0.64) == 163
+    assert rings.dim_channel(255, 0.15) == 38
+    assert rings.dim_rgb(255, 0, 0, 0.15, 0.64) == (24, 0, 0)
+    assert rings.dim_rgb(*rings.AMBER, 0.15)[0] > rings.dim_rgb(*rings.AMBER_SOFT, 0.15, rings.AMBER_SOFT_GAIN)[0]
     assert rings.shell_heat(1) == 1
     print("ok  discovered addresses 2 and 4 map to left and right")
 
@@ -132,6 +134,7 @@ class Rec:
         self.port = "rec"
         self.addresses = [1]
         self.events = events
+        self.led_brightness = 0.15
 
     def available(self) -> bool:
         return True
@@ -170,8 +173,8 @@ async def check_override(rings) -> None:
     await player.wait("left")
     left = [event for event in events if event[0] == "left"]
     assert [event for event in left if event[1] == "idle"] == [("left", "idle")]
-    assert ("left", "led", 0, 255, 0) in left
-    assert any(event[1] == "led" and event[2] > 0 and event[3] == 0 for event in left)
+    assert ("left", "led", 19, 0, 0) in left
+    assert not any(event[1] == "led" and event[3] > 0 for event in left)
 
     events.clear()
     await player.play("both", "turn_soon", 0.4)
@@ -214,7 +217,7 @@ class Proc:
         return "".join(self.lines)
 
 
-def check_test_flag() -> None:
+def check_test_flag(rings) -> None:
     proc = Proc([sys.executable, "rings/datafeel_rings.py", "--test", "--dry-run"])
     try:
         deadline = time.monotonic() + 25
@@ -250,8 +253,17 @@ def check_test_flag() -> None:
     assert "dots=lowest" in text and "dots=next" in text
     assert "play_frequency  MANUAL" in text
     assert "frequency=196" in text
-    assert "set_led  163,0,0" in text
-    assert "set_led  0,255,0" in text
+    assert "triple tap, no LED" in text
+    assert "soft amber flash" in text and "pulsing blue" in text
+    soon = rings.dim_rgb(*rings.AMBER_SOFT, rings.DEFAULT_LED_BRIGHTNESS, rings.AMBER_SOFT_GAIN)
+    amber = rings.dim_rgb(*rings.AMBER, rings.DEFAULT_LED_BRIGHTNESS)
+    blue = rings.dim_rgb(*rings.BLUE_PULSE, rings.DEFAULT_LED_BRIGHTNESS)
+    red = rings.dim_rgb(255, 0, 0, rings.DEFAULT_LED_BRIGHTNESS, 0.64)
+    for color in (soon, amber, blue, red):
+        assert f"set_led  {color[0]},{color[1]},{color[2]}" in text
+        assert max(color) <= 40
+    assert "set_led  0,255,0" not in text
+    assert "set_led  0,38,0" not in text
     assert "activate_thermal_intensity_control  1.00" in text
     assert text.count("stop_vibration") >= 12
     print("ok  --test --dry-run buzzes LEFT then RIGHT")
@@ -312,7 +324,7 @@ def check_bridge() -> None:
                 and "dots=4" in text
                 and "play_frequency  MANUAL" in text
                 and "activate_thermal_intensity_control  1.00" in text
-                and "set_led  0,255,0" in text
+                and "set_led  24,0,0" in text
                 and "stop_vibration" in text
             ):
                 break
@@ -321,6 +333,7 @@ def check_bridge() -> None:
             raise AssertionError(rings.text())
         assert "usbserial-210" in rings.text()
         assert "turn_soon" in rings.text() and "blue_shell" in rings.text()
+        assert "set_led  0,255,0" not in rings.text()
 
         engine = Proc([py, "engine/game.py", "--url", "ws://127.0.0.1:8791"])
         deadline = time.monotonic() + 6
@@ -344,7 +357,7 @@ def main() -> None:
     check_ports(rings)
     check_map(rings)
     asyncio.run(check_override(rings))
-    check_test_flag()
+    check_test_flag(rings)
     check_bridge()
     print("ok  datafeel rings")
 

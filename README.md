@@ -224,15 +224,17 @@ A second CP210x port, if one is plugged in, is the other wrist. Port names are s
 
 Playback calls are the ones in that sample: `registers.set_vibration_mode(VibrationMode.MANUAL)`, `play_frequency(hz, intensity)`, `stop_vibration()`, `set_led(r, g, b)`, `set_led_off()`, `activate_thermal_intensity_control(heat)`, `disable_all_thermal()`. BLE is the C# stack and this client does not use it.
 
-Patterns are asyncio tasks. A newer buzz for a wrist cancels the one already playing there. `both` drives both wrists. When a pattern finishes, and it is still the latest command for that wrist, the dot goes idle: `stop_vibration()` (intensity 0), LED off, thermal off.
+Patterns are asyncio tasks. A newer buzz for a wrist cancels the one already playing there. `both` drives both wrists. When a pattern finishes, and it is still the latest command for that wrist, the dot goes idle: `stop_vibration()` (intensity 0), `set_led_off()`, thermal off.
+
+Every LED is dim. `--led-brightness` (0 to 1, default `0.15`) scales the RGB channels, so the brightest channel is about 38/255. The flag is the global cap. A soft cue uses less of that cap than a bright one.
 
 | Pattern | Feel |
 | --- | --- |
-| `turn_soon` | One short pulse |
-| `turn_now` | Double pulse |
-| `car_approach` | Continuous vibration. Intensity and frequency (100–250 Hz) rise with `intensity`. Red global LED |
-| `blue_shell` | Strong rapid rumble, plus heat (`ThermalMode.MANUAL`) when `device.py` exposes it |
-| `combo` | Quick triple tap, green global LED |
+| `turn_soon` | One short pulse, soft amber flash |
+| `turn_now` | Double pulse, brighter amber flash on each tap |
+| `car_approach` | Continuous vibration. Intensity and frequency (100–250 Hz) rise with `intensity`. Dim red LED, brighter as `intensity` rises |
+| `blue_shell` | Strong rapid rumble, a blue pulse on each tick, plus heat (`ThermalMode.MANUAL`) when `device.py` exposes it |
+| `combo` | Quick triple tap. No LED |
 
 On two El Jefe modules, every dot that answered on that chain gets the wrist's pattern. On one chain, LEFT is the lowest address and RIGHT is the next.
 
@@ -257,7 +259,7 @@ Windows: `py -m pip install .` from that folder. macOS: `pip3 install .` if `pip
 
 ```bash
 pip install -r requirements.txt
-python3 rings/datafeel_rings.py --url ws://127.0.0.1:8765
+python3 rings/datafeel_rings.py --url ws://127.0.0.1:8765 --led-brightness 0.15
 ```
 
 Ports are auto-detected (CP210x VID `10C4` / PID `EA60`, the check inside `discover_devices`, or a `SLAB_USBtoUART` / `usbserial` name). The scan is addresses 1 through `--max-address` (default 4, same as the sample). The process prints each miss (`No device at address 1`) and then the map:
@@ -285,11 +287,12 @@ Without the dots, print the frames the hardware would get:
 python3 rings/datafeel_rings.py --dry-run --url ws://127.0.0.1:8765
 ```
 
-Cycle every pattern on the LEFT wrist, then the RIGHT, with no bridge. The first two buzzes are a mapping check (one long pulse, then two pulses):
+Cycle every pattern on the LEFT wrist, then the RIGHT, with no bridge. The first two buzzes are a mapping check (one long amber pulse, then two blue pulses). Combo taps with the LED off:
 
 ```bash
 python3 rings/datafeel_rings.py --test
 python3 rings/datafeel_rings.py --test --dry-run
+python3 rings/datafeel_rings.py --test --led-brightness 0.2
 ```
 
 On the demo laptop the fake bridge and the ring client can share a machine:

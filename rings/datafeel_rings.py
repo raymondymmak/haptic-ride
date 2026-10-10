@@ -31,7 +31,10 @@ probed with the same address loop.
 
 Playback uses the sample's calls: VibrationMode.MANUAL, play_frequency,
 stop_vibration, set_led, set_led_off, activate_thermal_intensity_control,
-disable_all_thermal. BLE is the C# stack and is not used here.
+disable_all_thermal. LEDs are scaled by --led-brightness (default 0.15).
+turn_soon is a soft amber flash, turn_now a brighter amber double flash,
+car_approach red, blue_shell pulsing blue. combo is a triple tap with no LED.
+The LED goes off when the pattern ends. BLE is the C# stack and is not used here.
 """
 
 from __future__ import annotations
@@ -75,6 +78,21 @@ TEST_INTENSITY = {
     "combo": 1.0,
 }
 
+# Full-scale colors. dim_rgb multiplies by --led-brightness (default 0.15),
+# so the brightest channel is about 38/255.
+DEFAULT_LED_BRIGHTNESS = 0.15
+AMBER_SOFT = (255, 140, 0)
+AMBER_SOFT_GAIN = 0.55
+AMBER = (255, 180, 0)
+BLUE_PULSE = (0, 72, 255)
+LED_NOTE = {
+    "turn_soon": "soft amber flash",
+    "turn_now": "brighter amber double flash",
+    "car_approach": "red",
+    "blue_shell": "pulsing blue",
+    "combo": "triple tap, no LED",
+}
+
 PatternFn = Callable[["Output", float], "asyncio.Future"]
 
 
@@ -87,12 +105,24 @@ def approach_frequency(intensity: float) -> float:
     return APPROACH_HZ_LO + clamp(intensity) * (APPROACH_HZ_HI - APPROACH_HZ_LO)
 
 
-def led_level(intensity: float) -> int:
-    """Global LED channel. Dim cues stay visible; full intensity is 255."""
-    gain = clamp(intensity)
-    if gain <= 0:
-        return 0
-    return max(48, int(round(255 * gain)))
+def dim_channel(channel: int, brightness: float, gain: float = 1.0) -> int:
+    """Scale one 0..255 channel by the global cap and an optional cue gain."""
+    scale = clamp(brightness) * clamp(gain)
+    return max(0, min(255, int(round(int(channel) * scale))))
+
+
+def dim_rgb(
+    red: int,
+    green: int,
+    blue: int,
+    brightness: float,
+    gain: float = 1.0,
+) -> tuple[int, int, int]:
+    return (
+        dim_channel(red, brightness, gain),
+        dim_channel(green, brightness, gain),
+        dim_channel(blue, brightness, gain),
+    )
 
 
 def shell_heat(intensity: float) -> float:
@@ -364,6 +394,7 @@ class Output:
         self.port = port
         self.addresses = list(addresses or [])
         self.label = label
+        self.led_brightness = DEFAULT_LED_BRIGHTNESS
 
     def available(self) -> bool:
         return True
@@ -728,59 +759,69 @@ def dry_run_outputs(args, found_ports: list[str]) -> tuple[dict[str, Output], st
     return outputs, note
 
 
-async def _quiet(chain: Output) -> None:
-    await chain.led_off()
-    await chain.thermal_off()
+async def show_led(chain: Output, red: int, green: int, blue: int, gain: float = 1.0) -> None:
+    """Global LED at the capped brightness. All-zero is off."""
+    color = dim_rgb(red, green, blue, chain.led_brightness, gain)
+    if color == (0, 0, 0):
+        await chain.led_off()
+    else:
+        await chain.led(*color)
 
 
 async def pattern_turn_soon(chain: Output, intensity: float) -> None:
-    """One short pulse."""
-    await _quiet(chain)
+    """One short pulse and a soft amber flash."""
+    await chain.thermal_off()
+    await show_led(chain, *AMBER_SOFT, AMBER_SOFT_GAIN)
     await chain.manual(clamp(intensity), TURN_SOON_HZ)
     await asyncio.sleep(TURN_SOON_S)
+    await chain.led_off()
 
 
 async def pattern_turn_now(chain: Output, intensity: float) -> None:
-    """Double pulse."""
-    await _quiet(chain)
+    """Double pulse with a brighter amber flash on each tap."""
+    await chain.thermal_off()
     gain = clamp(intensity)
     for _ in range(2):
+        await show_led(chain, *AMBER)
         await chain.manual(gain, TURN_NOW_HZ)
         await asyncio.sleep(TURN_NOW_ON_S)
+        await chain.led_off()
         await chain.manual(0.0, TURN_NOW_HZ)
         await asyncio.sleep(TURN_NOW_GAP_S)
 
 
 async def pattern_car_approach(chain: Output, intensity: float) -> None:
-    """Continuous rumble. Intensity and frequency both follow `intensity`. Red LED."""
+    """Continuous rumble. Intensity and frequency follow `intensity`. Dim red LED."""
     gain = clamp(intensity)
     await chain.thermal_off()
-    await chain.led(led_level(gain), 0, 0)
+    await show_led(chain, 255, 0, 0, gain)
     await chain.manual(gain, approach_frequency(gain))
     await asyncio.sleep(APPROACH_HOLD_S)
+    await chain.led_off()
 
 
 async def pattern_blue_shell(chain: Output, intensity: float) -> None:
-    """Strong rapid rumble, plus heat when the thermal API is on the dot."""
+    """Strong rapid rumble, a blue pulse on each tick, plus heat when the API exists."""
     gain = max(0.85, clamp(intensity))
-    await chain.led_off()
     if chain.has_thermal():
         await chain.heat(shell_heat(intensity))
     else:
         await chain.thermal_off()
     for pulse in range(BLUE_SHELL_PULSES):
         hz = BLUE_SHELL_HZ if pulse % 2 == 0 else BLUE_SHELL_HZ + 10.0
+        await show_led(chain, *BLUE_PULSE)
         await chain.manual(gain, hz)
         await asyncio.sleep(0.04)
+        await chain.led_off()
         await chain.manual(0.0, BLUE_SHELL_HZ)
         await asyncio.sleep(0.03)
 
 
 async def pattern_combo(chain: Output, intensity: float) -> None:
-    """Quick triple tap and a green global LED."""
+    """Quick triple tap. No LED — a success must not flash the dot."""
     gain = clamp(intensity)
     await chain.thermal_off()
-    await chain.led(0, 255, 0)
+    await chain.led_off()
     for _ in range(COMBO_TAPS):
         await chain.manual(gain, COMBO_HZ)
         await asyncio.sleep(0.045)
@@ -789,20 +830,22 @@ async def pattern_combo(chain: Output, intensity: float) -> None:
 
 
 async def pattern_identify_left(chain: Output, _intensity: float) -> None:
-    """Mapping check: one long pulse on the left wrist."""
+    """Mapping check: one long pulse and a dim amber light on the left wrist."""
     await chain.thermal_off()
-    await chain.led(255, 160, 0)
+    await show_led(chain, *AMBER)
     await chain.manual(1.0, 140)
     await asyncio.sleep(0.40)
+    await chain.led_off()
 
 
 async def pattern_identify_right(chain: Output, _intensity: float) -> None:
-    """Mapping check: two pulses on the right wrist."""
+    """Mapping check: two pulses and a dim blue flash on each, on the right wrist."""
     await chain.thermal_off()
-    await chain.led(0, 80, 255)
     for _ in range(2):
+        await show_led(chain, *BLUE_PULSE)
         await chain.manual(1.0, 180)
         await asyncio.sleep(0.16)
+        await chain.led_off()
         await chain.manual(0.0, 180)
         await asyncio.sleep(0.10)
 
@@ -948,8 +991,14 @@ async def run_socket(url: str, player: Player) -> None:
 
 async def run_test(player: Player) -> None:
     """Buzz LEFT, then RIGHT, so a wrong --swap is obvious before the catalog."""
-    print("TEST mapping: LEFT wrist first (one long pulse), then RIGHT (two pulses).", flush=True)
+    brightness = player.outputs["left"].led_brightness
+    cap = dim_channel(255, brightness)
+    print("TEST mapping: LEFT wrist first (one long pulse, dim amber), then RIGHT (two pulses, dim blue).", flush=True)
     print("TEST if those wrists are backwards, stop and rerun with --swap.", flush=True)
+    print(
+        f"TEST leds  brightness {brightness:.2f}  max channel {cap}/255. combo is a triple tap with no LED.",
+        flush=True,
+    )
     checks = (
         ("left", "identify one long pulse", pattern_identify_left),
         ("right", "identify two pulses", pattern_identify_right),
@@ -970,7 +1019,10 @@ async def run_test(player: Player) -> None:
             if not chain.available():
                 print(f"TEST {side.upper()} {pattern}  no dot discovered", flush=True)
                 continue
-            print(f"TEST {side.upper()} {pattern}  {chain.port}  dots={chain.describe()}", flush=True)
+            print(
+                f"TEST {side.upper()} {pattern}  {LED_NOTE[pattern]}  {chain.port}  dots={chain.describe()}",
+                flush=True,
+            )
             await player.play(side, pattern, intensity)
             await player.wait(side)
             await asyncio.sleep(0.2)
@@ -988,6 +1040,10 @@ async def amain(args) -> None:
         print("rings  dry-run: printing actuator commands, serial port stays closed", flush=True)
     else:
         outputs, note = connect_hardware(args, found)
+    for chain in outputs.values():
+        chain.led_brightness = args.led_brightness
+    cap = dim_channel(255, args.led_brightness)
+    print(f"rings  leds  brightness {args.led_brightness:.2f}  max channel {cap}/255", flush=True)
     print_mapping(note, outputs)
     player = Player(outputs)
     try:
@@ -1005,6 +1061,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--url", default="ws://127.0.0.1:8765", help="bridge websocket")
     parser.add_argument("--dry-run", action="store_true", help="print actuator commands instead of using the dots")
     parser.add_argument("--test", action="store_true", help="buzz LEFT then RIGHT for each pattern, no bridge")
+    parser.add_argument(
+        "--led-brightness",
+        type=float,
+        default=DEFAULT_LED_BRIGHTNESS,
+        help="scale every LED channel by this (0..1, default 0.15, about 40/255)",
+    )
     parser.add_argument("--port", default="", help="scan this one El Jefe instead of every CP210x node")
     parser.add_argument("--left-port", default="", help="left-wrist El Jefe serial port")
     parser.add_argument("--right-port", default="", help="right-wrist El Jefe serial port")
@@ -1020,6 +1082,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.max_address < 1 or args.max_address > 247:
         raise SystemExit("--max-address must be 1..247")
+    if not 0.0 <= args.led_brightness <= 1.0:
+        raise SystemExit("--led-brightness must be 0..1")
     for flag, value in (("--left-addr", args.left_addr), ("--right-addr", args.right_addr)):
         if value is not None and not 1 <= value <= 247:
             raise SystemExit(f"{flag} must be 1..247")
