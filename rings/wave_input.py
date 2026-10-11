@@ -2,7 +2,9 @@
 """Genki Wave as rider input. The Wave has no haptics; the DataFeel dots play.
 
 A real turn is about 45 degrees of world yaw over 0.7–3 seconds, integrated
-from the gyro about gravity. That publishes ``{"type": "turn", "turn": "left|right", "side": ...}``.
+from the gyro about gravity. The cue fires when that angle is crossed, once.
+The return to straight is locked out until the ring has been still for about
+a second. That publishes ``{"type": "turn", "turn": "left|right", "side": ...}``.
 A quick wrist flick (a short gyro or accel spike, or the Wave's own peak
 flag) is not a turn. It publishes ``{"type": "dismiss"}`` so the engine
 scores the car warning and the ring client cuts that buzz.
@@ -46,6 +48,9 @@ DEADBAND_DEG = 8.0
 # in 3s averages 15°/s, so it stays above this and is not wiped.
 STRAIGHT_DPS = 8.0
 STRAIGHT_S = 0.5
+# After a cue, the hand usually comes back to the bars. That return is not a
+# new turn. Ignore it until the ring has been still for about a second.
+TURN_LOCKOUT_S = 1.0
 TAU_HEADING_S = 0.12
 TAU_RATE_S = 0.08
 FLICK_DPS = 180.0
@@ -143,10 +148,10 @@ def button_gesture(button: str, action: str, hand: str | None = None) -> dict | 
 class GestureTracker:
     """Heading from integrated world-yaw gyro. A flick is a short spike.
 
-    Euler yaw from the ring can sit at 0 while the gyro still turns, so the
-    angle is the integral of the world-yaw rate. Recentering runs only after
-    the ring is straight again. It does not run while a turn is in progress,
-    or the integral would be wiped back to 0.
+    The cue fires on the sample where the integral crosses the turn angle,
+    while the wrist is still turning. The way back to straight is not another
+    turn: after a cue, rotation is ignored until the ring has been still for
+    about a second, and only then does the baseline recenter.
     """
 
     def __init__(
@@ -189,6 +194,9 @@ class GestureTracker:
         self._t: float | None = None
         self.origin = 0.0
         self._straight_for = 0.0
+        self._lockout = False
+        self._lock_still = 0.0
+        self._turn_sign = 0.0
         self.turn_t0: float | None = None
         self.turn_armed = True
         self._flick_on = False
@@ -229,6 +237,9 @@ class GestureTracker:
         self.rate = 0.0
         self._t = sample.t
         self._straight_for = 0.0
+        self._lockout = False
+        self._lock_still = 0.0
+        self._turn_sign = 0.0
         self.turn_t0 = None
         self.turn_armed = True
         self._flick_on = False
@@ -243,7 +254,9 @@ class GestureTracker:
         self._note_gyro(sample)
         alpha = 1.0 - math.exp(-dt / self.tau_rate)
         self.rate += alpha * (self._yaw_gyro - self.rate)
-        self.heading += self.rate * dt
+        # The smoothed rate lags the wrist. Integrating it crosses the turn
+        # angle after the motion has already stopped. The raw yaw does not.
+        self.heading += self._yaw_gyro * dt
 
     def _delta(self) -> float:
         return self.heading - self.origin
@@ -283,28 +296,74 @@ class GestureTracker:
         return events
 
     def _turn(self, sample: Sample) -> list[dict]:
+        # The return to the bars is still rotating. It must not open a new cue.
+        if self._lockout:
+            return []
         delta = self._delta()
+        # The 0.7 s window is the whole turn, including the first few degrees.
+        # Starting it at the deadband made a 45° turn look finished before it counted.
+        if self.turn_t0 is None and abs(self._yaw_gyro) > self.straight_dps:
+            self.turn_t0 = sample.t
+            self._turn_sign = 1.0 if self._yaw_gyro > 0 else -1.0
+        if self.turn_t0 is not None and self._turn_sign * self._yaw_gyro < -self.straight_dps:
+            # Coming back before the cue: the unwind is not a turn the other way.
+            if abs(delta) >= self.turn_deg:
+                self._begin_lockout()
+                return []
+            self.turn_t0 = sample.t
+            self._turn_sign = 1.0 if self._yaw_gyro > 0 else -1.0
         if abs(delta) < DEADBAND_DEG:
-            self.turn_t0 = None
-            self.turn_armed = True
+            if abs(self._yaw_gyro) <= self.straight_dps:
+                self.turn_t0 = None
+                self.turn_armed = True
             return []
         if self.turn_t0 is None:
             self.turn_t0 = sample.t
+            self._turn_sign = 1.0 if delta > 0 else -1.0
         if not self.turn_armed or abs(delta) < self.turn_deg:
             return []
         duration = sample.t - self.turn_t0
-        self.turn_armed = False
-        if duration < self.turn_min_s or duration > self.turn_max_s:
+        if duration > self.turn_max_s:
+            self._recenter()
             return []
+        # The angle can cross a little before 0.7 s. Hold the cue until the
+        # turn has lasted long enough, then fire while the wrist is still over.
+        if duration < self.turn_min_s:
+            return []
+        self._begin_lockout()
         side = "right" if delta > 0 else "left"
         if self.invert:
             side = "left" if side == "right" else "right"
         return [{"type": "turn", "turn": side, "side": side}]
 
+    def _begin_lockout(self) -> None:
+        self._lockout = True
+        self._lock_still = 0.0
+        self.turn_armed = False
+
+    def _recenter(self) -> None:
+        self.origin = self.heading
+        self._straight_for = 0.0
+        self._lock_still = 0.0
+        self._lockout = False
+        self._turn_sign = 0.0
+        self.turn_t0 = None
+        self.turn_armed = True
+
     def _straight(self, dt: float) -> None:
-        # Leave the origin alone until this turn either fires or is abandoned.
-        # Recentering here is what held the printed yaw at 0 on the ring.
-        if self.turn_armed and abs(self._delta()) >= DEADBAND_DEG:
+        if self._lockout:
+            # Still means the yaw gyro has settled, including after the hand
+            # comes back. Opposite rotation keeps the lockout running.
+            if abs(self._yaw_gyro) <= self.straight_dps:
+                self._lock_still += dt
+            else:
+                self._lock_still = 0.0
+            if self._lock_still >= TURN_LOCKOUT_S:
+                self._recenter()
+            return
+        # A turn that has left the deadband and has not crossed yet keeps its
+        # origin, including through a pause in the middle.
+        if self.turn_t0 is not None or abs(self._delta()) >= DEADBAND_DEG:
             self._straight_for = 0.0
             return
         if abs(self.rate) > self.straight_dps:
@@ -313,10 +372,7 @@ class GestureTracker:
         self._straight_for += dt
         if self._straight_for < self.straight_s:
             return
-        self.origin = self.heading
-        self._straight_for = 0.0
-        self.turn_t0 = None
-        self.turn_armed = True
+        self._recenter()
 
 
 def neutral_from(samples: list[Sample]) -> dict | None:

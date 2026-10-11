@@ -369,7 +369,7 @@ python3 rings/datafeel_rings.py --url ws://VM_IP:8765
 
 The Wave is input only. It does not buzz. `rings/datafeel_rings.py` still plays every cue. The Wave publishes rider gestures on the same bridge websocket.
 
-A turn is about 45 degrees of world yaw over 0.7–3 seconds. The tracker integrates the gyro axis about gravity: the Wave pose quaternion rotates the bias-corrected gyro into the world and the vertical component is yaw; with no pose, that axis is the accelerometer gravity vector. Euler yaw is not the heading. The ring's euler can sit at 0 while this integral moves, which is what `--print` shows as `int`. Recentering only happens once the ring is straight again. It does not run while a turn is in progress, so a slow start is not wiped back to 0. Crossing the turn angle inside the window publishes one cue:
+A turn is about 45 degrees of world yaw over 0.7–3 seconds. The tracker integrates the gyro axis about gravity: the Wave pose quaternion rotates the bias-corrected gyro into the world and the vertical component is yaw; with no pose, that axis is the accelerometer gravity vector. Euler yaw is not the heading. The ring's euler can sit at 0 while this integral moves, which is what `--print` shows as `int`. The cue is published on the sample where that integral crosses the turn angle, while the wrist is still turning. One turn publishes one cue. The hand coming back to straight is not the opposite turn: after a cue, rotation is ignored until the ring has been still for about a second, and only then does the baseline recenter. A later turn is measured from that new baseline.
 
 ```json
 {"type": "turn", "turn": "left", "side": "left"}

@@ -181,6 +181,33 @@ def check_gestures(wave) -> None:
 
     assert wave.TURN_DEG == 45.0 and wave.TURN_MIN_S == 0.7
 
+    # Left, then back to straight, is one left. The return must not emit right.
+    # The left has to be in the outbound motion, not after the wrist stops.
+    unwind = wave.GestureTracker()
+    unwind.update(wave.Sample(0.0, 0.0, (0.0, 0.0, 0.0)))
+    outbound = feed(unwind, wave, 0.0, -70.0, 0.05, 1.45)
+    outbound_turns = [event for event in outbound if event["type"] == "turn"]
+    assert outbound_turns == [{"type": "turn", "turn": "left", "side": "left"}], outbound_turns
+    returning = feed(unwind, wave, -70.0, 0.0, 1.45, 2.85)
+    assert [event for event in returning if event["type"] == "turn"] == [], returning
+    assert [event["turn"] for event in outbound + returning if event["type"] == "turn"] == ["left"]
+
+    # Crossing 45° slightly before 0.7 s still counts, once, while the wrist is over.
+    quick = wave.GestureTracker()
+    quick.update(wave.Sample(0.0, 0.0, (0.0, 0.0, 0.0)))
+    quick_out = feed(quick, wave, 0.0, -80.0, 0.05, 1.05)
+    quick_turns = [event for event in quick_out if event["type"] == "turn"]
+    assert quick_turns == [{"type": "turn", "turn": "left", "side": "left"}], quick_turns
+    quick_back = feed(quick, wave, -80.0, 0.0, 1.05, 2.05)
+    assert [event for event in quick_back if event["type"] == "turn"] == [], quick_back
+
+    # After the ring is still for about a second, a new turn starts from that baseline.
+    settle = feed(unwind, wave, 0.0, 0.0, 2.85, 4.2, gyro=(0.0, 0.0, 0.0))
+    assert [event for event in settle if event["type"] == "turn"] == []
+    fresh = feed(unwind, wave, 0.0, 60.0, 4.3, 5.6)
+    fresh_turns = [event for event in fresh if event["type"] == "turn"]
+    assert fresh_turns == [{"type": "turn", "turn": "right", "side": "right"}], fresh_turns
+
     class _Vec:
         def __init__(self, x, y, z):
             self.x, self.y, self.z = x, y, z
