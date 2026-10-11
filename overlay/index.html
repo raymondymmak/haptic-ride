@@ -183,6 +183,8 @@
   .ring.pat-turn_now .halo { animation: pulse 0.32s ease-in-out infinite; }
   .ring.pat-turn_soon .halo { animation: pulse 1.15s ease-in-out infinite; }
   .ring.pat-car_approach .halo { animation: pulse 0.55s ease-in-out infinite; }
+  .ring.pat-car_behind .halo,
+  .ring.sync .halo { animation: pulse 0.7s ease-in-out infinite; }
   .ring.pat-blue_shell .halo { animation: spin 0.8s linear infinite; }
   .core { position: relative; text-align: center; padding: 12px; }
   .which {
@@ -193,9 +195,27 @@
   .pat {
     font-family: "Chakra Petch", sans-serif;
     font-weight: 700;
-    font-size: 22px;
-    letter-spacing: 0.06em;
+    font-size: 18px;
+    letter-spacing: 0.04em;
     margin-top: 6px;
+  }
+  .led-row {
+    margin-top: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    color: var(--muted);
+  }
+  .swatch {
+    width: 18px;
+    height: 18px;
+    border-radius: 4px;
+    border: 2px solid rgba(255,255,255,0.28);
+    background: transparent;
+    box-shadow: inset 0 0 0 1px rgba(0,0,0,0.55);
   }
   .inten {
     font-family: "Chakra Petch", sans-serif;
@@ -223,7 +243,8 @@
     gap: 10px;
   }
   .nav {
-    display: flex;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
     align-items: center;
     gap: 14px;
     background: var(--panel);
@@ -231,6 +252,26 @@
     border-radius: 16px;
     padding: 8px 16px;
   }
+  .source-col {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 4px;
+    min-width: 0;
+  }
+  .pill {
+    font-size: 13px;
+    letter-spacing: 0.08em;
+    color: var(--ink);
+    white-space: nowrap;
+  }
+  .pill b {
+    font-family: "Chakra Petch", sans-serif;
+    font-weight: 700;
+  }
+  .pill.live b { color: #9dcaa8; }
+  .pill.down b { color: #ff8d8d; }
+  .pill.turn b { color: var(--gold); }
   .arrow { color: var(--muted); display: grid; }
   .nav.turn-left .arrow { transform: scaleX(-1); }
   .nav.turn_soon .arrow { color: #ffb020; }
@@ -249,14 +290,45 @@
   }
   .turn-name { color: var(--muted); letter-spacing: 0.12em; font-size: 13px; }
 
-  .radar {
+  .rear {
     position: relative;
     border-radius: 18px;
     overflow: hidden;
     background:
-      radial-gradient(ellipse at 50% 0%, rgba(127, 223, 255, 0.14), transparent 46%),
+      radial-gradient(ellipse at 50% 0%, rgba(127, 223, 255, 0.1), transparent 46%),
       linear-gradient(#141820, #0c0e13);
     border: 1px solid var(--line);
+  }
+  .bands {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    grid-template-columns: 33fr 34fr 33fr;
+    pointer-events: none;
+    z-index: 1;
+  }
+  .band {
+    border-right: 1px solid rgba(243, 240, 234, 0.16);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding-top: 14%;
+    color: rgba(244, 241, 234, 0.55);
+    letter-spacing: 0.16em;
+    font-size: 13px;
+    font-weight: 600;
+  }
+  .band:last-child { border-right: 0; }
+  .band small {
+    margin-top: 6px;
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    color: rgba(255, 141, 141, 0.7);
+  }
+  .band.hot {
+    background: linear-gradient(rgba(255, 90, 74, 0.05), rgba(255, 90, 74, 0.22));
+    color: #ffb0a8;
+    box-shadow: inset 0 0 40px rgba(255, 70, 50, 0.25);
   }
   .lane {
     position: absolute;
@@ -275,16 +347,7 @@
     background: linear-gradient(rgba(127, 223, 255, 0.02), rgba(127, 223, 255, 0.1));
     clip-path: polygon(50% 0, 100% 100%, 0 100%);
   }
-  .sweep {
-    position: absolute;
-    left: 50%;
-    top: 16%;
-    width: 2px;
-    height: 68%;
-    background: linear-gradient(transparent, rgba(140, 220, 255, 0.85));
-    transform-origin: top center;
-    animation: sweep 2.8s ease-in-out infinite;
-  }
+  .sweep { display: none; }
   .rider {
     position: absolute;
     left: 50%;
@@ -295,22 +358,7 @@
     z-index: 2;
     filter: drop-shadow(0 3px 4px rgba(0,0,0,0.65));
   }
-  .zones { position: absolute; inset: 0; pointer-events: none; z-index: 1; }
-  .zone {
-    position: absolute;
-    top: 22%;
-    font-size: 11px;
-    letter-spacing: 0.16em;
-    color: rgba(244, 241, 234, 0.42);
-  }
-  .zone-left { left: 18%; }
-  .zone-behind {
-    left: 50%;
-    top: 20%;
-    transform: translateX(-50%);
-    color: #ff8d8d;
-  }
-  .zone-right { right: 18%; }
+  .zones { display: none; }
   .ticks {
     position: absolute;
     left: 10px;
@@ -322,14 +370,64 @@
     color: var(--muted);
     font-size: 11px;
     letter-spacing: 0.08em;
+    z-index: 3;
   }
-  .radar-label {
+  .rear-label {
     position: absolute;
-    right: 12px;
+    left: 12px;
     bottom: 10px;
     color: var(--muted);
-    font-size: 11px;
+    font-size: 12px;
     letter-spacing: 0.16em;
+    z-index: 3;
+  }
+  .dismissed {
+    position: absolute;
+    left: 50%;
+    top: 16%;
+    transform: translateX(-50%);
+    z-index: 6;
+    font-family: "Chakra Petch", sans-serif;
+    font-weight: 700;
+    font-size: clamp(26px, 3.4vw, 44px);
+    letter-spacing: 0.18em;
+    color: #f4f1ea;
+    background: rgba(8, 9, 13, 0.78);
+    border: 1px solid rgba(255,255,255,0.35);
+    padding: 8px 18px;
+    border-radius: 12px;
+  }
+  .dismissed.show { animation: slam 0.35s cubic-bezier(.2, 1.4, .4, 1) both; }
+  .pip {
+    position: absolute;
+    right: 10px;
+    bottom: 10px;
+    z-index: 5;
+    width: min(34%, 280px);
+    background: #050608;
+    border: 1px solid rgba(255,255,255,0.22);
+    border-radius: 10px;
+    overflow: hidden;
+  }
+  .pip img {
+    display: block;
+    width: 100%;
+    aspect-ratio: 4 / 3;
+    object-fit: cover;
+    background: #050608;
+  }
+  .pip.hidden img { display: none; }
+  .pip button {
+    width: 100%;
+    border: 0;
+    border-radius: 0;
+    justify-content: center;
+    background: rgba(8, 9, 13, 0.88);
+    color: var(--ink);
+    letter-spacing: 0.12em;
+    font-size: 11px;
+    text-transform: uppercase;
+    padding: 6px 8px;
   }
   #dots { position: absolute; inset: 0; }
   .dot {
@@ -443,11 +541,6 @@
   }
   @keyframes spin { to { transform: rotate(1turn); } }
   @keyframes drive { to { background-position: 0 22px; } }
-  @keyframes sweep {
-    0% { transform: rotate(-32deg); opacity: 0.25; }
-    50% { opacity: 1; }
-    100% { transform: rotate(32deg); opacity: 0.25; }
-  }
   @keyframes slam {
     0% { opacity: 0; transform: translate(-50%, -60%) scale(0.7); filter: blur(4px); }
     100% { opacity: 1; transform: translate(-50%, -50%) scale(1); filter: blur(0); }
@@ -474,6 +567,8 @@
     #feed { display: none; }
     .meta { display: none; }
     footer { justify-content: stretch; }
+    .nav { grid-template-columns: 1fr; }
+    .source-col { align-items: flex-start; }
     .keys { width: 100%; display: grid; grid-template-columns: 1fr 1fr; }
     .keys button { min-height: 52px; justify-content: center; }
   }
@@ -500,7 +595,7 @@
         <h1>HAPTIC RIDE</h1>
         <div class="sub">
           <span id="status">LINKING</span>
-          <span class="mode-switch" role="group" aria-label="Car source">
+          <span class="mode-switch" role="group" aria-label="Camera source">
             <button type="button" id="mode-sim" aria-pressed="false">Simulated</button>
             <button type="button" id="mode-real" aria-pressed="false">Real</button>
           </span>
@@ -522,6 +617,7 @@
           <div class="which">LEFT RING</div>
           <div class="pat" id="pat-left">QUIET</div>
           <div class="inten" id="int-left">0.00</div>
+          <div class="led-row"><i class="swatch" id="swatch-left"></i><span id="led-left">NO LED</span></div>
           <div class="badge" id="badge-left" hidden>CHECK</div>
         </div>
       </aside>
@@ -537,25 +633,33 @@
             <div class="meters" id="meters">—</div>
             <div class="turn-name" id="turn-name">no cue yet</div>
           </div>
+          <div class="source-col">
+            <div class="pill down" id="wave-link">WAVE · <b>NOT CONNECTED</b></div>
+            <div class="pill" id="wave-gesture">LAST GESTURE · <b>—</b></div>
+            <div class="pill" id="nav-source">NAV · <b>—</b></div>
+          </div>
         </div>
-        <div class="radar" id="radar">
-          <div class="cone"></div>
+        <div class="rear" id="radar">
+          <div class="bands" aria-hidden="true">
+            <div class="band" id="band-left"><span>LEFT</span></div>
+            <div class="band band-mid" id="band-behind"><span>BEHIND</span><small>BOTH RINGS</small></div>
+            <div class="band" id="band-right"><span>RIGHT</span></div>
+          </div>
           <div class="lane"></div>
-          <div class="sweep"></div>
           <div class="rider" aria-hidden="true">
             <svg width="42" height="42" viewBox="0 0 48 48">
               <path d="M24 2 L44 45 L24 35 L4 45 Z" fill="#f4f1ea" stroke="#ffe08a" stroke-width="2" stroke-linejoin="round"/>
             </svg>
           </div>
-          <div class="zones" aria-hidden="true">
-            <span class="zone zone-left">LEFT</span>
-            <span class="zone zone-behind">BEHIND</span>
-            <span class="zone zone-right">RIGHT</span>
-          </div>
           <div class="ticks"><span>close</span><span>15m</span><span>far</span></div>
           <div id="dots"></div>
-          <div class="radar-label" id="car-count">REAR RADAR</div>
+          <div class="dismissed" id="dismissed" hidden>DISMISSED</div>
+          <div class="rear-label" id="car-count">REAR VIEW</div>
           <div class="toast" id="toast" aria-live="assertive"></div>
+          <div class="pip" id="pip">
+            <img id="camera" alt="Rear camera" src="/camera.mjpg">
+            <button type="button" id="pip-toggle" aria-pressed="true">hide camera</button>
+          </div>
         </div>
       </section>
       <aside class="ring" id="ring-right">
@@ -564,6 +668,7 @@
           <div class="which">RIGHT RING</div>
           <div class="pat" id="pat-right">QUIET</div>
           <div class="inten" id="int-right">0.00</div>
+          <div class="led-row"><i class="swatch" id="swatch-right"></i><span id="led-right">NO LED</span></div>
           <div class="badge" id="badge-right" hidden>CHECK</div>
         </div>
       </aside>
@@ -573,6 +678,7 @@
         <button type="button" data-act="check-left" id="k-check-left"><kbd>A</kbd><span>check left</span></button>
         <button type="button" data-act="look-back" id="k-look-back"><kbd>S</kbd><span>look back</span></button>
         <button type="button" data-act="check-right" id="k-check-right"><kbd>D</kbd><span>check right</span></button>
+        <button type="button" data-act="dismiss" id="k-dismiss"><kbd>F</kbd><span>dismiss</span></button>
         <button type="button" data-act="turn-left" id="k-turn-left"><kbd>←</kbd><span>turn left</span></button>
         <button type="button" data-act="turn-right" id="k-turn-right"><kbd>→</kbd><span>turn right</span></button>
         <button type="button" id="sound" aria-pressed="false"><kbd>M</kbd><span>sound off</span></button>
@@ -584,14 +690,6 @@
     </footer>
   </div>
 <script>
-const LABEL = {
-  turn_soon: "SOON",
-  turn_now: "NOW",
-  car_approach: "CAR",
-  car_behind: "BEHIND",
-  blue_shell: "SHELL",
-  combo: "COMBO",
-};
 const COLOR = {
   turn_soon: "#ffb020",
   turn_now: "#ff4d1a",
@@ -600,6 +698,24 @@ const COLOR = {
   blue_shell: "#4d8dff",
   combo: "#ffe08a",
 };
+const LED = {
+  turn_soon: ["AMBER", "rgb(38, 35, 0)", "#ffb020"],
+  turn_now: ["AMBER", "rgb(38, 35, 0)", "#ffb020"],
+  car_approach: ["RED", "rgb(38, 0, 0)", "#ff3355"],
+  car_behind: ["RED", "rgb(38, 0, 0)", "#ff3355"],
+  blue_shell: ["BLUE", "rgb(0, 11, 38)", "#4d8dff"],
+  combo: ["NO LED", "transparent", "rgba(255,255,255,0.28)"],
+};
+const CLASS_LABEL = {
+  person: "PERSON",
+  bicycle: "BIKE",
+  motorcycle: "BIKE",
+  bike: "BIKE",
+  car: "CAR",
+  bus: "BUS",
+  truck: "TRUCK",
+};
+const NAV_LABEL = { gps: "PHONE GPS", phone: "PHONE GPS", spotter: "SPOTTER", scripted: "SCRIPTED" };
 const VIBE = {
   turn_soon: [30, 110, 30],
   turn_now: [80, 50, 80, 50, 140],
@@ -634,6 +750,10 @@ let audioCtx = null;
 let sawState = false;
 let bridgeMode = "";
 let source = "";
+let waveConnected = false;
+let waveSeen = 0;
+let dismissTimer = 0;
+let comboUntil = 0;
 
 function setSource(value) {
   if (value !== "sim" && value !== "real") return;
@@ -649,11 +769,51 @@ function setSource(value) {
 function setStatus(ok, mode) {
   if (mode) bridgeMode = mode;
   const el = document.getElementById("status");
-  const kind = bridgeMode === "real" ? "HARDWARE" : bridgeMode === "synthetic" ? "SYNTHETIC" : bridgeMode === "fake" ? "FAKE BRIDGE" : "LINKING";
   const src = source === "sim" ? "SIMULATED" : source === "real" ? "REAL" : "";
-  el.textContent = ok ? (src ? kind + " · " + src : kind) : "RECONNECTING";
+  el.textContent = ok ? (src ? "CAMERA · " + src : "CAMERA") : "RECONNECTING";
   el.classList.toggle("live", ok);
   el.classList.toggle("down", !ok);
+  const coach = document.getElementById("coach");
+  if (coach.dataset.live === "state") return;
+  coach.textContent = ok
+    ? (source === "sim" ? "Simulated cars. Nav cues keep running." : "Rear camera is live. Nav cues keep running.")
+    : "Reconnecting to the bridge…";
+}
+
+function paintWave() {
+  const link = document.getElementById("wave-link");
+  link.classList.toggle("live", waveConnected);
+  link.classList.toggle("down", !waveConnected);
+  link.innerHTML = "WAVE · <b>" + (waveConnected ? "CONNECTED" : "NOT CONNECTED") + "</b>";
+}
+
+function noteGesture(text) {
+  const el = document.getElementById("wave-gesture");
+  el.classList.toggle("turn", text.indexOf("TURN") === 0);
+  el.innerHTML = "LAST GESTURE · <b>" + text + "</b>";
+}
+
+function flashDismissed() {
+  const el = document.getElementById("dismissed");
+  el.hidden = false;
+  el.classList.remove("show");
+  void el.offsetWidth;
+  el.classList.add("show");
+  clearTimeout(dismissTimer);
+  dismissTimer = setTimeout(() => {
+    el.hidden = true;
+    el.classList.remove("show");
+  }, 900);
+}
+
+function gestureFrom(msg) {
+  if (msg.type === "turn") {
+    const side = msg.turn || msg.side;
+    if (side === "left" || side === "right") return "TURN " + side.toUpperCase();
+  }
+  if (msg.type === "dismiss") return "DISMISS";
+  if (msg.type === "look_back") return "LOOK BACK";
+  return "";
 }
 
 function logLine(text) {
@@ -675,7 +835,12 @@ function act(name) {
   if (name === "look-back") send({ type: "look_back" });
   if (name === "turn-left") send({ type: "turn", turn: "left" });
   if (name === "turn-right") send({ type: "turn", turn: "right" });
+  if (name === "dismiss") {
+    send({ type: "dismiss" });
+    flashDismissed();
+  }
   if (name === "look-back") logLine("look back");
+  else if (name === "dismiss") logLine("dismiss");
   else if (name.startsWith("check")) logLine("check " + name.split("-")[1]);
   else if (name.startsWith("turn")) logLine("turn " + name.split("-")[1]);
   const btn = document.getElementById("k-" + name);
@@ -728,13 +893,19 @@ function vibrate(side, msg) {
 function paintRing(side, checks) {
   const cmd = rings[side];
   const root = document.getElementById("ring-" + side);
-  const pat = cmd ? cmd.pattern : "";
-  root.className = "ring" + (pat ? " on pat-" + pat : "");
+  const pat = comboUntil > performance.now() ? "combo" : (cmd ? cmd.pattern : "");
+  const behindSync = pat === "car_behind";
+  root.className = "ring" + (pat ? " on pat-" + pat : "") + (behindSync ? " sync" : "");
   root.style.setProperty("--i", cmd ? String(cmd.intensity) : "0");
   const color = COLOR[pat] || (side === "left" ? "#7fdfff" : "#ffc56b");
   root.style.setProperty("--c", color);
-  document.getElementById("pat-" + side).textContent = pat ? LABEL[pat] : "QUIET";
+  document.getElementById("pat-" + side).textContent = pat ? pat.toUpperCase() : "QUIET";
   document.getElementById("int-" + side).textContent = cmd ? Number(cmd.intensity).toFixed(2) : "0.00";
+  const led = LED[pat] || ["NO LED", "transparent", "rgba(255,255,255,0.28)"];
+  const swatch = document.getElementById("swatch-" + side);
+  swatch.style.background = led[1];
+  swatch.style.borderColor = led[2];
+  document.getElementById("led-" + side).textContent = led[0];
   const list = checks || [];
   document.getElementById("badge-" + side).hidden = !(list.includes(side) || list.includes("behind"));
   const glow = document.getElementById("glow-" + side);
@@ -744,11 +915,13 @@ function paintRing(side, checks) {
 
 function paintNav(nav) {
   const box = document.getElementById("nav");
+  const sourceEl = document.getElementById("nav-source");
   if (!nav) {
     box.className = "nav";
     document.getElementById("phase").textContent = "OPEN ROAD";
     document.getElementById("meters").textContent = "—";
     document.getElementById("turn-name").textContent = "no cue yet";
+    sourceEl.innerHTML = "NAV · <b>—</b>";
     return;
   }
   const phase = nav.phase || "far";
@@ -756,6 +929,14 @@ function paintNav(nav) {
   document.getElementById("phase").textContent = phase === "turn_now" ? "NOW" : phase === "turn_soon" ? "SOON" : "AHEAD";
   document.getElementById("meters").textContent = Math.max(0, Math.round(nav.in_m)) + "m";
   document.getElementById("turn-name").textContent = nav.turn.toUpperCase() + " TURN";
+  const key = String(nav.source || "");
+  const name = NAV_LABEL[key] || "—";
+  let extra = "";
+  if ((key === "gps" || key === "phone") && nav.accuracy != null && nav.accuracy !== "") {
+    const meters = Number(nav.accuracy);
+    if (!Number.isNaN(meters)) extra = " · ±" + Math.round(meters) + " m";
+  }
+  sourceEl.innerHTML = "NAV · <b>" + name + extra + "</b>";
 }
 
 function paintRadar() {
@@ -770,16 +951,21 @@ function paintRadar() {
     if (behind) dot.classList.add("behind");
     let hash = 0;
     for (const ch of String(car.id || car.side)) hash = (hash * 33 + ch.charCodeAt(0)) % 5;
-    const x = behind ? 50 : (car.side === "left" ? 36 : 64) + (hash - 2) * 3.4;
-    dot.style.top = (16 + (dist / 32) * 74) + "%";
+    const x = behind ? 50 : (car.side === "left" ? 16 : 84) + (hash - 2) * 1.6;
+    dot.style.top = (18 + (dist / 32) * 68) + "%";
     dot.style.left = x + "%";
     const label = document.createElement("span");
-    label.textContent = dist.toFixed(0) + "m";
+    const kind = CLASS_LABEL[String(car.class || "").toLowerCase()] || "";
+    label.textContent = (kind ? kind + " " : "") + dist.toFixed(0) + "m";
     dot.appendChild(label);
     layer.appendChild(dot);
   }
-  const idle = source === "sim" ? "SIMULATED" : "REAR RADAR";
-  document.getElementById("car-count").textContent = list.length ? "REAR · " + list.length + " CAR" + (list.length > 1 ? "S" : "") : idle;
+  const behindHot = list.some((car) => car.side === "behind" || car.side === "center");
+  document.getElementById("band-behind").classList.toggle("hot", behindHot);
+  const idle = source === "sim" ? "SIMULATED" : "REAR VIEW";
+  document.getElementById("car-count").textContent = list.length
+    ? "REAR VIEW · " + list.length
+    : idle;
 }
 
 function paintScore(score, combo) {
@@ -855,7 +1041,11 @@ function onState(msg) {
   paintRing("right", lastChecks);
   paintFlash(msg.flash);
   paintHot(msg.check, msg.need_turn, msg.nav);
-  if (msg.coach) document.getElementById("coach").textContent = msg.coach;
+  if (msg.coach) {
+    const coach = document.getElementById("coach");
+    coach.dataset.live = "state";
+    coach.textContent = msg.coach;
+  }
   const stats = msg.stats || {};
   document.getElementById("pills").textContent =
     "items " + (stats.items || 0) + "  ·  dodges " + (stats.dodges || 0) + "  ·  drifts " + (stats.drifts || 0);
@@ -863,8 +1053,15 @@ function onState(msg) {
 
 function onBuzz(msg) {
   if (msg.pattern === "combo") {
+    comboUntil = performance.now() + 450;
     document.body.classList.add("combo");
-    setTimeout(() => document.body.classList.remove("combo"), 450);
+    paintRing("left", lastChecks);
+    paintRing("right", lastChecks);
+    setTimeout(() => {
+      document.body.classList.remove("combo");
+      paintRing("left", lastChecks);
+      paintRing("right", lastChecks);
+    }, 450);
     vibrate("both", msg);
     logLine("buzz both combo 1.00");
     return;
@@ -905,7 +1102,26 @@ function onMsg(msg) {
     cars.set(msg.id || msg.side, msg);
     paintRadar();
   } else if (msg.type === "nav" && !sawState) {
-    paintNav({ turn: msg.turn, in_m: msg.in_m, phase: msg.in_m <= 12 ? "turn_now" : msg.in_m <= 45 ? "turn_soon" : "far" });
+    paintNav({
+      turn: msg.turn,
+      in_m: msg.in_m,
+      phase: msg.in_m <= 12 ? "turn_now" : msg.in_m <= 45 ? "turn_soon" : "far",
+      source: msg.source,
+      accuracy: msg.accuracy,
+    });
+  } else if (msg.type === "wave") {
+    waveConnected = !!msg.connected;
+    if (waveConnected) waveSeen = performance.now();
+    paintWave();
+  } else {
+    const gesture = gestureFrom(msg);
+    if (gesture) {
+      waveConnected = true;
+      waveSeen = performance.now();
+      paintWave();
+      noteGesture(gesture);
+      if (msg.type === "dismiss") flashDismissed();
+    }
   }
 }
 
@@ -936,7 +1152,7 @@ window.addEventListener("keydown", (ev) => {
   if (ev.repeat) return;
   const key = ev.key.toLowerCase();
   if (key === "m") { toggleSound(); ev.preventDefault(); return; }
-  const map = { a: "check-left", d: "check-right", s: "look-back", w: "look-back", arrowleft: "turn-left", arrowright: "turn-right" };
+  const map = { a: "check-left", d: "check-right", s: "look-back", w: "look-back", f: "dismiss", arrowleft: "turn-left", arrowright: "turn-right" };
   const name = map[key];
   if (!name) return;
   ev.preventDefault();
@@ -947,6 +1163,22 @@ for (let i = 0; i < 8; i++) {
   const pip = document.createElement("i");
   document.getElementById("pips").appendChild(pip);
 }
+document.getElementById("pip-toggle").addEventListener("click", () => {
+  const pip = document.getElementById("pip");
+  const hidden = pip.classList.toggle("hidden");
+  const btn = document.getElementById("pip-toggle");
+  const img = document.getElementById("camera");
+  btn.setAttribute("aria-pressed", hidden ? "false" : "true");
+  btn.textContent = hidden ? "show camera" : "hide camera";
+  if (hidden) img.removeAttribute("src");
+  else img.src = "/camera.mjpg?t=" + Date.now();
+});
+setInterval(() => {
+  if (waveConnected && performance.now() - waveSeen > 5000) {
+    waveConnected = false;
+    paintWave();
+  }
+}, 1000);
 connect();
 </script>
 </body>

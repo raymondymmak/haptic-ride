@@ -16,10 +16,11 @@ Open [http://127.0.0.1:8641](http://127.0.0.1:8641).
 | --- | --- |
 | `A` / `D` | Shoulder check left / right. Either one also counts for a car directly behind |
 | `S` or `W` | Look back. Scores a car in the behind zone |
+| `F` | Dismiss. Same as a Wave flick: scores the warning and stops that buzz |
 | `←` / `→` | Turn left / right |
 | `M` | Tick sounds for the screen recording |
 
-The overlay header has a **Simulated / Real** control. On the hardware bridge it swaps the car source without restarting the process. Turn cues keep running in both.
+The overlay header reads **CAMERA · REAL** or **CAMERA · SIMULATED**. **Simulated / Real** swaps the car source without restarting the process. Turn cues keep running in both. The rear view draws LEFT, BEHIND, and RIGHT. A car in BEHIND lights both rings together. The page also shows the Wave link, the last ring gesture, where the nav cue came from, and a small live camera.
 
 Shoulder-check the ring that says CHECK. Turn when the arrow says NOW. The loop is 56 seconds and then repeats.
 
@@ -78,8 +79,8 @@ One JSON object per WebSocket text frame. Fields the engine adds (`id`, and the 
 
 ```json
 {"type": "car", "side": "left", "dist": 14.2, "speed": 4.0, "id": "c0-1"}
-{"type": "car", "side": "behind", "dist": 8.0, "speed": 3.0, "id": "cam-behind"}
-{"type": "nav", "turn": "right", "in_m": 18.0, "id": "n0-1"}
+{"type": "car", "side": "behind", "dist": 8.0, "speed": 3.0, "id": "cam-behind", "class": "car"}
+{"type": "nav", "turn": "right", "in_m": 18.0, "id": "n0-1", "source": "scripted"}
 {"type": "shoulder_check", "side": "left"}
 {"type": "look_back"}
 {"type": "turn", "turn": "right", "side": "right"}
@@ -88,7 +89,7 @@ One JSON object per WebSocket text frame. Fields the engine adds (`id`, and the 
 {"type": "mode", "value": "sim"}
 ```
 
-`speed` is closing speed in m/s, positive when the car is approaching. `dist` and `in_m` are meters. `id` lets two cars exist at once; without it the engine treats the side as the id. `side` on a car is `left`, `right`, or `behind` (`center` is accepted as `behind`). A shoulder check on either side scores a behind car. `look_back` scores only that car.
+`speed` is closing speed in m/s, positive when the car is approaching. `dist` and `in_m` are meters. `id` lets two cars exist at once; without it the engine treats the side as the id. `side` on a car is `left`, `right`, or `behind` (`center` is accepted as `behind`). Optional `class` is the detector label (`car`, `person`, `bicycle`, `motorcycle`, `bus`, `truck`); the overlay prints it on the dot. Optional nav `source` is `scripted`, `gps` (a phone may send `phone`), or `spotter`. Optional `accuracy` is GPS error in meters. A shoulder check on either side scores a behind car. `look_back` scores only that car. `{"type":"wave","connected":true}` is the Genki Wave heartbeat. The game ignores it.
 
 `turn` takes `turn` or `side` (`left` or `right`). The overlay sends `turn`. The Wave sends both. `dismiss` is a wrist flick: it scores like a shoulder check and silences that car warning so the buzz stops. With `side`, it answers that wrist and a car behind. Without `side`, it answers every car that is currently warning and scores the nearest (a blue shell first).
 
@@ -208,7 +209,7 @@ python3 engine/game.py --url ws://VM_IP:8765
 
 Open `http://VM_IP:8641` in the Mac browser. That page's websocket goes back to the VM, which is the only bridge. One game engine, on the Mac.
 
-The page starts on **Real** (the radar). **Simulated** sends `{"type":"mode","value":"sim"}`. The process stays up: radar frames keep being read, but cars on the bus switch to the scripted route from `fake_bridge.py` (`nav_at` / `cars_at`). **Real** sends `value: "real"` and radar cars publish again. Turn cues from that same route keep streaming in both modes, so the rings still get SOON and NOW while you are on the live radar. The header shows the source that the bridge confirmed (`HARDWARE · REAL` or `HARDWARE · SIMULATED`). The fake bridge has no radar, so it answers every mode request with `sim` and the scripted demo does not stop.
+The page starts on **Real**. **Simulated** sends `{"type":"mode","value":"sim"}`. The process stays up: sensor frames keep being read, but cars on the bus switch to the scripted route from `fake_bridge.py` (`nav_at` / `cars_at`). **Real** sends `value: "real"` and live cars publish again. Turn cues from that same route keep streaming in both modes. The header shows `CAMERA · REAL` or `CAMERA · SIMULATED`. The fake bridge has no camera, so it answers every mode request with `sim` and the scripted demo does not stop.
 
 To try the filter with no kit, on either machine:
 
@@ -228,7 +229,9 @@ Stop `./run.sh` first. It uses ports 8765 and 8641.
 
 The detector is ultralytics YOLO (`yolo11n.pt` by default, `yolov8n.pt` if you pass `--model`). The device is MPS when PyTorch reports it, and CPU if MPS is missing or a call fails. Classes are person, bicycle, car, motorcycle, bus, and truck. The first launch downloads the weights.
 
-Side comes from the box center. `--center-width` (default `0.34`) is the behind band, centered in the frame, so the edges sit at 0.33 and 0.67. The camera faces backward, so the picture is mirrored by default (`--mirror` / `--no-mirror`) and image-left is the rider's left. Left of the band is `left`, right of it is `right`, and the band itself is published as `side: "behind"`. The overlay draws that car on the center line directly behind the rider arrow and labels the zone BEHIND. Each of the three sides publishes its nearest qualifying target. If two on the same side are within 0.5 m, the one closing faster wins.
+Side comes from the box center. `--center-width` (default `0.34`) is the behind band, centered in the frame, so the edges sit at 0.33 and 0.67. The camera faces backward, so the picture is mirrored by default (`--mirror` / `--no-mirror`) and image-left is the rider's left. Left of the band is `left`, right of it is `right`, and the band itself is published as `side: "behind"`. Each car event includes `class`. The overlay draws LEFT / BEHIND / RIGHT and puts that label on the dot. BEHIND buzzes both wrists with the same pattern. Each of the three sides publishes its nearest qualifying target. If two on the same side are within 0.5 m, the one closing faster wins.
+
+The annotated frame (boxes, class labels, and the three zone lines) is served at `http://127.0.0.1:8641/camera.mjpg` as MJPEG, about 400 px wide, 12 fps, JPEG quality 70. The overlay shows it in the corner. **Hide camera** stops the `<img>`. `--preview` is off unless you pass it; that flag is only the separate OpenCV window.
 
 Distance is `cal / (bbox height / frame height)`, in meters. The default `cal` is the distance at which that class would fill the frame vertically (a rough 50° webcam): car 3.2, person 3.6, bicycle 2.4, motorcycle 2.6, bus 6.4, truck 6.0. Measure one object at a known distance and set `cal = distance × height_fraction`. Speed is `(previous distance − distance) / frame time`, positive when the box is growing. A car is published only after 3 consecutive frames in which it is closing at `--min-approach` (0.4 m/s) or already inside `--near` (6 m).
 
@@ -237,10 +240,10 @@ python3 -m venv .venv
 source .venv/bin/activate
 python3 -m pip install -r requirements.txt
 python3 bridge/camera_bridge.py --list-cameras
-python3 bridge/camera_bridge.py --camera 0 --preview
+python3 bridge/camera_bridge.py --camera 0
 ```
 
-Continuity Camera shows up as one of the indexes from `--list-cameras`. macOS will ask the terminal for camera permission. `q` closes the preview window and stops the bridge.
+Continuity Camera shows up as one of the indexes from `--list-cameras`. macOS will ask the terminal for camera permission. The live picture is the corner view on the overlay. `--preview` opens the old OpenCV window as well; `q` closes that window and stops the bridge.
 
 Two more terminals, same venv, once the bridge is up:
 

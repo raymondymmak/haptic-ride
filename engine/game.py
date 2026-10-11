@@ -112,12 +112,18 @@ class Game:
             return
         cid = str(msg.get("id") or side)
         prev = self.cars.get(cid)
+        label = msg.get("class")
+        if not isinstance(label, str) or not label.strip():
+            label = prev.get("cls", "") if prev else ""
+        else:
+            label = label.strip().lower()
         self.cars[cid] = {
             "id": cid,
             "side": side,
             "dist": dist,
             "speed": speed,
             "blue": speed >= BLUE_MPS,
+            "cls": label,
             "warned": bool(prev and prev["warned"]) or dist <= ALERT_M,
             "scored": bool(prev and prev["scored"]),
             "silenced": bool(prev and prev.get("silenced")),
@@ -144,6 +150,23 @@ class Game:
             self.misses += 1
             self.set_flash("MISSED TURN", 0, "miss")
         self.nav = {"id": nid, "turn": turn, "in_m": in_m}
+        source = msg.get("source")
+        if source == "phone":
+            source = "gps"
+        if source in ("gps", "spotter", "scripted"):
+            self.nav["source"] = source
+        elif prev is not None and prev["id"] == nid and prev.get("source"):
+            self.nav["source"] = prev["source"]
+        accuracy = msg.get("accuracy")
+        if accuracy is None:
+            accuracy = msg.get("gps_accuracy")
+        if accuracy is not None:
+            try:
+                self.nav["accuracy"] = round(float(accuracy), 1)
+            except (TypeError, ValueError):
+                pass
+        elif prev is not None and prev["id"] == nid and "accuracy" in prev:
+            self.nav["accuracy"] = prev["accuracy"]
 
     def on_check(self, side: str) -> int | None:
         """Score a shoulder check, or a look-back (`side` "behind").
@@ -293,7 +316,7 @@ class Game:
             if checks[0] == "behind":
                 return "CAR BEHIND — look back or shoulder-check for an item box"
             return f"CAR ON THE {checks[0].upper()} — shoulder check for an item box"
-        return "Rings buzz the turn. Radar shows what is behind you."
+        return "Rings buzz the turn. The rear camera shows what is behind you."
 
     @staticmethod
     def _place(side: str) -> str:
@@ -303,19 +326,19 @@ class Game:
 
     def snapshot(self) -> dict:
         rings = self.rings()
-        cars = sorted(
-            (
-                {
-                    "id": car["id"],
-                    "side": car["side"],
-                    "dist": round(car["dist"], 1),
-                    "speed": car["speed"],
-                    "blue": car["blue"],
-                }
-                for car in self.cars.values()
-            ),
-            key=lambda car: car["dist"],
-        )
+        cars = []
+        for car in self.cars.values():
+            row = {
+                "id": car["id"],
+                "side": car["side"],
+                "dist": round(car["dist"], 1),
+                "speed": car["speed"],
+                "blue": car["blue"],
+            }
+            if car.get("cls"):
+                row["class"] = car["cls"]
+            cars.append(row)
+        cars.sort(key=lambda car: car["dist"])
         flash = None
         if self.flash is not None and self.now < self.flash["until"]:
             flash = {
@@ -335,6 +358,10 @@ class Game:
                 "in_m": round(self.nav["in_m"], 1),
                 "phase": phase,
             }
+            if self.nav.get("source"):
+                nav["source"] = self.nav["source"]
+            if "accuracy" in self.nav:
+                nav["accuracy"] = self.nav["accuracy"]
         checks = sorted(
             {
                 car["side"]

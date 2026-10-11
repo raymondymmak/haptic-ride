@@ -605,6 +605,8 @@ def _make_callback(api, tracker: GestureTracker, queue: asyncio.Queue, samples: 
     class Callback(api["WaveCallback"]):
         def __init__(self) -> None:
             self._printed = 0.0
+            self._wave_beat = 0.0
+            self.linked = False
 
         def __call__(self, data) -> None:
             # Skip the library firmware gate so a demo ring on an older build still streams.
@@ -630,6 +632,11 @@ def _make_callback(api, tracker: GestureTracker, queue: asyncio.Queue, samples: 
                 samples.append(sample)
             for msg in tracker.update(sample):
                 queue.put_nowait(msg)
+            now = time.monotonic()
+            if now - self._wave_beat >= 2.0:
+                self._wave_beat = now
+                self.linked = True
+                queue.put_nowait({"type": "wave", "connected": True})
             if show and sample.t - self._printed >= PRINT_EVERY_S:
                 self._printed = sample.t
                 print("wave  " + tracker.preview(), flush=True)
@@ -749,6 +756,10 @@ async def _stream_forever(api, address, hand, args, queue, samples, stop) -> Non
         except Exception as exc:
             print(f"wave  {address}  {exc.__class__.__name__}: {exc}", flush=True)
             status = "error"
+        if callback.linked:
+            callback.linked = False
+            callback._wave_beat = 0.0
+            queue.put_nowait({"type": "wave", "connected": False})
         if stop.is_set() or status == "stopped":
             return
         print(
@@ -766,8 +777,11 @@ async def _stream_forever(api, address, hand, args, queue, samples, stop) -> Non
 async def _pump(queue: asyncio.Queue, bus: Bus | None) -> None:
     while True:
         msg = await queue.get()
-        label = msg.get("side") or msg.get("turn") or ""
-        print(f"wave  {msg['type']:8} {label}", flush=True)
+        if msg.get("type") == "wave":
+            print(f"wave  link {'up' if msg.get('connected') else 'down'}", flush=True)
+        else:
+            label = msg.get("side") or msg.get("turn") or ""
+            print(f"wave  {msg['type']:8} {label}", flush=True)
         if bus is not None:
             await bus.send(msg)
 

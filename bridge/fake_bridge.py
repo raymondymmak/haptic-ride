@@ -75,6 +75,7 @@ def nav_at(t: float, lap: int) -> dict | None:
                 "turn": turn,
                 "in_m": round(max(0.0, in_m), 1),
                 "id": f"n{lap}-{index}",
+                "source": "scripted",
             }
     return None
 
@@ -95,6 +96,7 @@ def cars_at(t: float, lap: int) -> list[dict]:
                 "dist": round(dist, 1),
                 "speed": speed,
                 "id": f"c{lap}-{index}",
+                "class": "car",
             }
         )
     return found

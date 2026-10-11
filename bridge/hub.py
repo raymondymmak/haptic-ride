@@ -19,6 +19,29 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 OVERLAY = ROOT / "overlay" / "index.html"
 
+
+class JpegFeed:
+    """Latest annotated camera frame. The overlay reads it as MJPEG."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._jpeg: bytes | None = None
+        self._seq = 0
+
+    def publish(self, jpeg: bytes) -> None:
+        if not jpeg:
+            return
+        with self._lock:
+            self._jpeg = jpeg
+            self._seq += 1
+
+    def latest(self) -> tuple[int, bytes | None]:
+        with self._lock:
+            return self._seq, self._jpeg
+
+
+FEED = JpegFeed()
+
 PATTERNS = {"turn_soon", "turn_now", "car_approach", "car_behind", "blue_shell", "combo"}
 BUZZ_SIDES = {"left", "right", "both"}
 
@@ -137,6 +160,9 @@ def serve_overlay(host: str, http_port: int, ws_port: int) -> None:
                 self.send_response(204)
                 self.end_headers()
                 return
+            if path == "/camera.mjpg":
+                self._stream_camera()
+                return
             if path not in ("/", "/index.html"):
                 self.send_error(404)
                 return
@@ -147,6 +173,34 @@ def serve_overlay(host: str, http_port: int, ws_port: int) -> None:
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(body)
+
+        def _stream_camera(self) -> None:
+            self.send_response(200)
+            self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+            self.send_header("Pragma", "no-cache")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            last = -1
+            try:
+                while True:
+                    seq, jpeg = FEED.latest()
+                    if jpeg is None or seq == last:
+                        time.sleep(0.04)
+                        continue
+                    last = seq
+                    self.wfile.write(
+                        b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "
+                        + str(len(jpeg)).encode("ascii")
+                        + b"\r\n\r\n"
+                    )
+                    self.wfile.write(jpeg)
+                    self.wfile.write(b"\r\n")
+                    self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                return
+            except Exception:
+                return
 
         def log_message(self, fmt: str, *args) -> None:
             return

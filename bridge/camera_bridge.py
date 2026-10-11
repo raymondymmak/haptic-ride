@@ -8,9 +8,12 @@ overlay 8641). Nav cues and the Simulated / Real toggle behave like
 bridge/real_bridge_stub.py: Real is the camera, Simulated is the scripted
 route, and turn cues run in both.
 
-    python3 bridge/camera_bridge.py --camera 0 --preview
+    python3 bridge/camera_bridge.py --camera 0
     python3 bridge/camera_bridge.py --list-cameras
     python3 bridge/camera_bridge.py --synthetic
+
+The overlay shows the annotated frame at /camera.mjpg. --preview is an
+optional OpenCV window and is off unless you pass it.
 
 Distance is cal[class] / (bbox height / frame height). --cal replaces any
 class constant. Speed is how fast that distance is falling, in m/s.
@@ -30,7 +33,7 @@ if str(BRIDGE_DIR) not in sys.path:
     sys.path.insert(0, str(BRIDGE_DIR))
 
 from fake_bridge import TICK_S, simulate
-from hub import Hub, add_server_args, lan_ip, serve_overlay
+from hub import FEED, Hub, add_server_args, lan_ip, serve_overlay
 
 # COCO ids on yolov8n / yolo11n. Anything else is ignored.
 CLASS_IDS = {
@@ -61,6 +64,10 @@ SPEED_CAP = 20.0
 MIN_IOU = 0.15
 MAX_MISSED = 2
 DEFAULT_FPS = 10
+# The page plays this. Kept small so JPEG encoding does not stall detection.
+STREAM_FPS = 12
+STREAM_WIDTH = 400
+STREAM_QUALITY = 70
 # Share of the frame that counts as directly behind the rider, centered.
 CENTER_WIDTH = 0.34
 WINDOW = "Haptic Ride camera"
@@ -335,6 +342,7 @@ class SceneTracker:
                 "side": side,
                 "dist": round(track.dist, 2),
                 "speed": round(speed, 2),
+                "class": track.cls,
             })
         return messages
 
@@ -501,13 +509,52 @@ def show_preview(cv2, frame) -> str:
 
 
 def car_message(track_msg: dict) -> dict:
-    return {
+    msg = {
         "type": "car",
         "id": track_msg["id"],
         "side": track_msg["side"],
         "dist": track_msg["dist"],
         "speed": track_msg["speed"],
     }
+    label = track_msg.get("class")
+    if isinstance(label, str) and label:
+        msg["class"] = label
+    return msg
+
+
+def publish_view(cv2, frame, tracker: SceneTracker, mirror: bool) -> None:
+    """Resize, draw zones and boxes, and store one JPEG for /camera.mjpg."""
+    height, width = frame.shape[:2]
+    if width != STREAM_WIDTH and width > 0:
+        scale = STREAM_WIDTH / float(width)
+        frame = cv2.resize(
+            frame,
+            (STREAM_WIDTH, max(1, int(round(height * scale)))),
+            interpolation=cv2.INTER_AREA,
+        )
+    else:
+        frame = frame.copy()
+    draw_preview(cv2, frame, tracker, mirror)
+    ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), STREAM_QUALITY])
+    if ok:
+        FEED.publish(buf.tobytes())
+
+
+def _cv2():
+    try:
+        import cv2
+    except ImportError:
+        return None
+    return cv2
+
+
+def _blank(cv2):
+    """A dark rear-view canvas for --synthetic, which has no webcam frame."""
+    import numpy as np
+
+    canvas = np.zeros((300, STREAM_WIDTH, 3), dtype=np.uint8)
+    canvas[:] = (22, 20, 18)
+    return canvas
 
 
 class Publisher:
@@ -560,13 +607,23 @@ async def run_synthetic(hub: Hub, args, stop: asyncio.Event) -> None:
     tracker = make_tracker(args)
     publisher = Publisher(hub)
     dt = 1.0 / args.fps
-    frame = 0
+    frame_i = 0
     t = 0.0
+    last_jpeg = 0.0
+    cv2 = _cv2()
     print("camera  synthetic boxes — right car closes, then a near car on the left", flush=True)
     while not stop.is_set():
-        for msg in tracker.update(synthetic_boxes(frame, args.cal), t):
+        for msg in tracker.update(synthetic_boxes(frame_i, args.cal), t):
             await publisher.send(msg)
-        frame += 1
+        now = time.monotonic()
+        if cv2 is not None and now - last_jpeg >= 1.0 / STREAM_FPS:
+            last_jpeg = now
+            try:
+                publish_view(cv2, _blank(cv2), tracker, True)
+            except Exception as exc:
+                print(f"camera  stream skipped: {exc.__class__.__name__}: {exc}", flush=True)
+                cv2 = None
+        frame_i += 1
         t += dt
         await asyncio.sleep(dt)
 
@@ -600,6 +657,7 @@ async def run_camera(hub: Hub, args, stop: asyncio.Event) -> None:
     publisher = Publisher(hub)
     period = 1.0 / args.fps
     preview = args.preview
+    last_jpeg = 0.0
     try:
         while not stop.is_set():
             started = time.monotonic()
@@ -618,6 +676,13 @@ async def run_camera(hub: Hub, args, stop: asyncio.Event) -> None:
                 continue
             for msg in tracker.update(boxes, time.monotonic()):
                 await publisher.send(msg)
+            now = time.monotonic()
+            if now - last_jpeg >= 1.0 / STREAM_FPS:
+                last_jpeg = now
+                try:
+                    publish_view(cv2, frame, tracker, args.mirror)
+                except Exception as exc:
+                    print(f"camera  stream skipped: {exc.__class__.__name__}: {exc}", flush=True)
             if preview:
                 draw_preview(cv2, frame, tracker, args.mirror)
                 state = show_preview(cv2, frame)
@@ -656,6 +721,7 @@ def banner(args) -> None:
     print("", flush=True)
     print(f"  haptic-ride  camera bridge  ({mode})", flush=True)
     print(f"  overlay     http://127.0.0.1:{args.http_port}", flush=True)
+    print(f"  rear view   http://127.0.0.1:{args.http_port}/camera.mjpg", flush=True)
     print(f"  websocket   ws://{ip}:{args.port}", flush=True)
     print(f"  mirror      {mirror}  (camera faces backward)", flush=True)
     print("  route       nav cues stay on; overlay can switch cars to Simulated", flush=True)
@@ -713,7 +779,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=True,
         help="flip the frame horizontally (default on: the camera faces backward)",
     )
-    parser.add_argument("--preview", action="store_true", help="window with boxes and left/behind/right zones")
+    parser.add_argument(
+        "--preview",
+        action="store_true",
+        help="optional OpenCV window. Off by default; the overlay shows /camera.mjpg",
+    )
     parser.add_argument("--synthetic", action="store_true", help="publish a scripted closing car, no camera or model")
     parser.add_argument(
         "--cal",

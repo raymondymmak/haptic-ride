@@ -55,6 +55,7 @@ def check_geometry(cam) -> None:
     args = cam.build_parser().parse_args([])
     assert args.camera == 0 and args.port == 8765 and args.http_port == 8641
     assert args.mirror is True and args.persist == 3 and args.center_width == 0.34
+    assert args.preview is False
     assert cam.build_parser().parse_args(["--no-mirror"]).mirror is False
     print("ok  distance, thirds, and --mirror default")
 
@@ -70,6 +71,7 @@ def check_tracks(cam) -> None:
         messages = tracker.update(cam.synthetic_boxes(frame, cal), frame * dt)
         assert all(msg["side"] in ("left", "behind", "right") for msg in messages)
         assert all(msg["type"] == "car" and msg["id"] == f"cam-{msg['side']}" for msg in messages)
+        assert all(msg["class"] == "car" for msg in messages)
         for msg in messages:
             if msg["side"] == "right":
                 right.append((frame, msg))
@@ -106,6 +108,7 @@ def check_tracks(cam) -> None:
     close_box = cam.box_at("person", 0.9, cal["person"] / 5.0)
     messages = near.update([far_box, close_box], 0.0)
     assert [msg["dist"] for msg in messages] == [5.0]
+    assert messages[0]["class"] == "person"
 
     race = cam.SceneTracker(cal=cal, persist=1, near_m=30.0, min_approach=0.0)
     race.update(
@@ -117,6 +120,7 @@ def check_tracks(cam) -> None:
         0.1,
     )
     assert len(messages) == 1 and messages[0]["side"] == "right"
+    assert messages[0]["class"] in ("car", "bus")
     assert messages[0]["speed"] > 1.0
     print("ok  persistence, nearest side, and a one-frame spike stays quiet")
 
@@ -238,10 +242,37 @@ async def check_socket() -> None:
     print("ok  --synthetic publishes cars, nav, and the Simulated/Real toggle")
 
 
+def check_stream() -> None:
+    import socket
+    import urllib.request
+
+    import hub
+
+    hub.FEED.publish(b"\xff\xd8\xff\xd9")
+    hub.serve_overlay("127.0.0.1", 8664, 8799)
+    time.sleep(0.15)
+    sock = socket.create_connection(("127.0.0.1", 8664), 2)
+    sock.settimeout(2)
+    sock.sendall(b"GET /camera.mjpg HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+    buf = b""
+    while b"\xff\xd8" not in buf and len(buf) < 8192:
+        chunk = sock.recv(1024)
+        if not chunk:
+            break
+        buf += chunk
+    sock.close()
+    assert b"multipart/x-mixed-replace" in buf, buf[:200]
+    assert b"\xff\xd8" in buf
+    page = urllib.request.urlopen("http://127.0.0.1:8664/", timeout=2).read()
+    assert b"hide camera" in page and b"REAR VIEW" in page and b"dismiss" in page
+    print("ok  /camera.mjpg and the rear-view page")
+
+
 def main() -> None:
     cam = load_camera()
     check_geometry(cam)
     check_tracks(cam)
+    check_stream()
     proc = Proc([
         sys.executable,
         "bridge/camera_bridge.py",

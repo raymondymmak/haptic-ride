@@ -37,6 +37,16 @@ def check_rules(game_mod) -> None:
     assert game_mod.nav_cue(10)[0] == "turn_now"
     assert game_mod.nav_cue(10)[1] < game_mod.nav_cue(2)[1]
 
+    labeled = game_mod.Game()
+    labeled.now = 1
+    labeled.on_car({"type": "car", "side": "right", "dist": 9, "speed": 2, "id": "bike", "class": "bicycle"})
+    assert labeled.snapshot()["cars"][0]["class"] == "bicycle"
+    labeled.on_nav({"type": "nav", "turn": "right", "in_m": 12, "id": "g", "source": "phone", "accuracy": 6.4})
+    nav = labeled.snapshot()["nav"]
+    assert nav["source"] == "gps" and nav["accuracy"] == 6.4
+    labeled.on_nav({"type": "nav", "turn": "left", "in_m": 40, "id": "s", "source": "spotter"})
+    assert labeled.snapshot()["nav"]["source"] == "spotter"
+
     game = game_mod.Game()
     game.now = 10
     game.on_nav({"type": "nav", "turn": "left", "in_m": 30, "id": "n"})
