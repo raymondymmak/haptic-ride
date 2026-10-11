@@ -11,7 +11,8 @@ Scoring (pay = 1 + 0.5 × combo, then combo grows by 1):
     drift boost  150 × pay   turn input matches the cue during TURN NOW
     miss                   a warned car passes unseen, or TURN NOW expires
 
-The nearest car owns the ring. A turn cue uses a ring only when no car does.
+The nearest car owns the ring. A car directly behind owns both rings and
+buzzes them together. A turn cue uses a ring only when no car does.
 Safety wins over navigation when they land on the same side.
 """
 
@@ -105,7 +106,9 @@ class Game:
             speed = float(msg["speed"])
         except (KeyError, TypeError, ValueError):
             return
-        if side not in ("left", "right"):
+        if side == "center":
+            side = "behind"
+        if side not in ("left", "right", "behind"):
             return
         cid = str(msg.get("id") or side)
         prev = self.cars.get(cid)
@@ -142,17 +145,28 @@ class Game:
         self.nav = {"id": nid, "turn": turn, "in_m": in_m}
 
     def on_check(self, side: str) -> int | None:
-        if side not in ("left", "right"):
+        """Score a shoulder check, or a look-back (`side` "behind").
+
+        A check on the left or the right also counts for a car directly
+        behind. The same-side car is scored first when both are there.
+        """
+        if side == "center":
+            side = "behind"
+        if side not in ("left", "right", "behind"):
             return None
+        if side == "behind":
+            wanted = ("behind",)
+        else:
+            wanted = (side, "behind")
         live = [
             car
             for car in self.cars.values()
-            if car["side"] == side and not car["scored"] and car["dist"] <= ALERT_M
+            if car["side"] in wanted and not car["scored"] and car["dist"] <= ALERT_M
         ]
         if not live:
             self.set_flash("NO CAR", 0, "whiff")
             return None
-        live.sort(key=lambda car: (not car["blue"], car["dist"]))
+        live.sort(key=lambda car: (car["side"] != side, not car["blue"], car["dist"]))
         car = live[0]
         car["scored"] = True
         if car["blue"]:
@@ -195,17 +209,27 @@ class Game:
         out: dict[str, dict | None] = {"left": None, "right": None}
         nearest: dict[str, dict] = {}
         for car in self.cars.values():
-            if car["dist"] > ALERT_M:
+            if car["dist"] > ALERT_M or car["side"] not in ("left", "right", "behind"):
                 continue
             current = nearest.get(car["side"])
             if current is None or car["dist"] < current["dist"]:
                 nearest[car["side"]] = car
-        for side, car in nearest.items():
+        for side in ("left", "right"):
+            car = nearest.get(side)
+            if car is None:
+                continue
             if car["blue"]:
                 pattern, intensity = "blue_shell", round(max(0.85, car_intensity(car["dist"])), 2)
             else:
                 pattern, intensity = "car_approach", car_intensity(car["dist"])
             out[side] = {"pattern": pattern, "intensity": intensity}
+        behind = nearest.get("behind")
+        if behind is not None:
+            # One shared command so both wrists show the same pulse.
+            cmd = {"pattern": "car_behind", "intensity": car_intensity(behind["dist"])}
+            for side in ("left", "right"):
+                if out[side] is None:
+                    out[side] = cmd
         if self.nav is not None:
             cue = nav_cue(self.nav["in_m"])
             if cue is not None and out[self.nav["turn"]] is None:
@@ -222,12 +246,21 @@ class Game:
     def _coach(self, checks: list[str], need_turn: bool) -> str:
         blues = [car for car in self.cars.values() if car["blue"] and not car["scored"]]
         if blues:
-            return f"BLUE SHELL ON THE {blues[0]['side'].upper()} — shoulder-check to dodge"
+            blues.sort(key=lambda car: car["dist"])
+            return f"BLUE SHELL {self._place(blues[0]['side'])} — shoulder-check to dodge"
         if need_turn and self.nav is not None:
             return f"TURN {self.nav['turn'].upper()} NOW — drift boost"
         if checks:
+            if checks[0] == "behind":
+                return "CAR BEHIND — look back or shoulder-check for an item box"
             return f"CAR ON THE {checks[0].upper()} — shoulder check for an item box"
         return "Rings buzz the turn. Radar shows what is behind you."
+
+    @staticmethod
+    def _place(side: str) -> str:
+        if side == "behind":
+            return "BEHIND"
+        return f"ON THE {side.upper()}"
 
     def snapshot(self) -> dict:
         rings = self.rings()
@@ -298,9 +331,31 @@ def handle(game: Game, msg: dict) -> int | None:
         game.on_nav(msg)
     elif kind == "shoulder_check":
         return game.on_check(msg.get("side"))
+    elif kind == "look_back":
+        return game.on_check("behind")
     elif kind == "turn":
         return game.on_turn(msg.get("turn"))
     return None
+
+
+def buzz_plan(rings: dict[str, dict | None]) -> list[tuple[str, dict]]:
+    """Buzz messages for this frame. A behind car on both wrists is one `both` buzz."""
+    left = rings.get("left")
+    right = rings.get("right")
+    if (
+        left
+        and right
+        and left.get("pattern") == "car_behind"
+        and right.get("pattern") == "car_behind"
+        and left.get("intensity") == right.get("intensity")
+    ):
+        return [("both", left)]
+    planned = []
+    for side in ("left", "right"):
+        cmd = rings.get(side)
+        if cmd:
+            planned.append((side, cmd))
+    return planned
 
 
 async def session(url: str) -> None:
@@ -309,8 +364,8 @@ async def session(url: str) -> None:
     game = Game()
     async with connect(url, open_timeout=2) as ws:
         print(f"game: connected {url}", flush=True)
-        last_buzz: dict[str, dict | None] = {"left": None, "right": None}
-        last_at = {"left": 0.0, "right": 0.0}
+        last_buzz: dict[str, dict | None] = {"left": None, "right": None, "both": None}
+        last_at = {"left": 0.0, "right": 0.0, "both": 0.0}
         last_state = 0.0
         while True:
             raw = None
@@ -338,8 +393,8 @@ async def session(url: str) -> None:
             if award or now - last_state >= 0.1:
                 await ws.send(json.dumps(game.snapshot(), separators=(",", ":")))
                 last_state = now
-            for side, cmd in game.rings().items():
-                due = cmd is not None and now - last_at[side] >= 0.45
+            for side, cmd in buzz_plan(game.rings()):
+                due = now - last_at[side] >= 0.45
                 if cmd != last_buzz[side] or due:
                     last_buzz[side] = cmd
                     last_at[side] = now

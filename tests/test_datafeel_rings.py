@@ -225,6 +225,24 @@ async def check_turn_cues(rings) -> None:
     print("ok  turn_soon glows and turn_now blinks the same amber")
 
 
+async def check_behind_sync(rings) -> None:
+    events: list = []
+    player = rings.Player({"left": Rec("left", events), "right": Rec("right", events)})
+    await player.play("both", "car_behind", 0.8)
+    await player.wait()
+    pulses = [event for event in events if event[1] == "vib" and event[2] > 0]
+    sides = [event[0] for event in pulses]
+    assert sides.count("left") == rings.BEHIND_PULSES
+    assert sides.count("right") == rings.BEHIND_PULSES
+    assert sides[:2] == ["left", "right"]
+    assert sides != sorted(sides)
+    leds = [event for event in events if event[1] == "led"]
+    assert len(leds) == rings.BEHIND_PULSES * 2
+    assert all(event[3] == 0 and event[4] == 0 and 0 < event[2] <= 40 for event in leds)
+    assert leds[0][2:] == leds[1][2:]
+    print("ok  car_behind pulses both wrists on the same beat")
+
+
 class Proc:
     def __init__(self, args: list[str]):
         self.lines: list[str] = []
@@ -294,6 +312,7 @@ def check_test_flag(rings) -> None:
     assert "frequency=196" in text
     assert "triple tap, no LED" in text
     assert "slow amber glow" in text and "rapid amber blink" in text and "pulsing blue" in text
+    assert "TEST BOTH car_behind" in text and "synced red pulses" in text
     amber = rings.dim_rgb(*rings.AMBER, rings.DEFAULT_LED_BRIGHTNESS)
     soon = rings.dim_rgb(*rings.AMBER_SOFT, rings.DEFAULT_LED_BRIGHTNESS, rings.AMBER_SOFT_GAIN)
     assert soon == amber
@@ -403,6 +422,7 @@ def main() -> None:
     check_map(rings)
     asyncio.run(check_override(rings))
     asyncio.run(check_turn_cues(rings))
+    asyncio.run(check_behind_sync(rings))
     check_test_flag(rings)
     check_bridge()
     print("ok  datafeel rings")

@@ -61,8 +61,8 @@ SPEED_CAP = 20.0
 MIN_IOU = 0.15
 MAX_MISSED = 2
 DEFAULT_FPS = 10
-LEFT_ZONE = 1.0 / 3.0
-RIGHT_ZONE = 2.0 / 3.0
+# Share of the frame that counts as directly behind the rider, centered.
+CENTER_WIDTH = 0.34
 WINDOW = "Haptic Ride camera"
 
 
@@ -84,13 +84,19 @@ def closing_mps(prev_dist: float, dist: float, dt: float) -> float:
     return clamp((prev_dist - dist) / dt, -SPEED_CAP, SPEED_CAP)
 
 
+def zone_edges(center_width: float) -> tuple[float, float]:
+    """Left and right edges of the behind band. The band is centered in the frame."""
+    half = clamp(center_width, 0.05, 0.9) / 2.0
+    return 0.5 - half, 0.5 + half
+
+
 def side_of(cx: float, left_max: float, right_min: float) -> str:
-    """Rider-space thirds. cx is 0 on the rider's left after --mirror."""
+    """Rider space. cx is 0 on the rider's left after --mirror. The middle band is behind."""
     if cx < left_max:
         return "left"
     if cx > right_min:
         return "right"
-    return "center"
+    return "behind"
 
 
 def iou(a, b) -> float:
@@ -198,18 +204,18 @@ class Track:
 
 
 class SceneTracker:
-    """Keep tracks, then publish at most one car on the left and one on the right.
+    """Keep tracks, then publish the nearest car on the left, behind, and right.
 
     A track is published after `persist` consecutive frames in which it is
-    closing at `min_approach` or already inside `near_m`. Center boxes are
-    drawn and tracked, and they stay off the bus (the engine has two rings).
+    closing at `min_approach` or already inside `near_m`. The middle band is
+    `side: "behind"`.
     """
 
     def __init__(
         self,
         cal: dict[str, float] | None = None,
-        left_max: float = LEFT_ZONE,
-        right_min: float = RIGHT_ZONE,
+        left_max: float | None = None,
+        right_min: float | None = None,
         persist: int = PERSIST_FRAMES,
         min_approach: float = MIN_APPROACH_MPS,
         near_m: float = NEAR_M,
@@ -217,6 +223,8 @@ class SceneTracker:
         min_iou: float = MIN_IOU,
     ):
         self.cal = dict(DEFAULT_CAL if cal is None else cal)
+        if left_max is None or right_min is None:
+            left_max, right_min = zone_edges(CENTER_WIDTH)
         self.left_max = left_max
         self.right_min = right_min
         self.persist = max(1, int(persist))
@@ -292,7 +300,7 @@ class SceneTracker:
         self._qualify(track, dist, speed)
 
     def _qualify(self, track: Track, dist: float, speed: float) -> None:
-        on_a_side = track.side in ("left", "right")
+        on_a_side = track.side in ("left", "behind", "right")
         closing = speed >= self.min_approach
         near = dist <= self.near_m
         if on_a_side and dist <= self.max_dist and (closing or near):
@@ -305,7 +313,7 @@ class SceneTracker:
         """Nearest qualifying track on each side. Within 0.5 m, the faster one."""
         chosen: dict[str, Track] = {}
         for track in self.tracks:
-            if not track.emitting or track.side not in ("left", "right"):
+            if not track.emitting or track.side not in ("left", "behind", "right"):
                 continue
             current = chosen.get(track.side)
             if current is None:
@@ -316,7 +324,7 @@ class SceneTracker:
             elif abs(track.dist - current.dist) <= 0.5 and track.speed > current.speed:
                 chosen[track.side] = track
         messages = []
-        for side in ("left", "right"):
+        for side in ("left", "behind", "right"):
             track = chosen.get(side)
             if track is None:
                 continue
@@ -332,10 +340,9 @@ class SceneTracker:
 
 
 def synthetic_boxes(frame: int, cal: dict[str, float] | None = None) -> list[Box]:
-    """A 30-frame loop: a car closing on the right, then a near car on the left.
+    """A 30-frame loop: a car closing on the right, a car closing in the behind band, then a near car on the left.
 
-    A far person stands on the left the whole time. A car grows in the center.
-    Those two stay off the bus.
+    A far person stands on the left the whole time and stays off the bus.
     """
     table = DEFAULT_CAL if cal is None else cal
     i = frame % 30
@@ -455,7 +462,7 @@ def draw_preview(cv2, frame, tracker: SceneTracker, mirror: bool):
     cv2.line(frame, (x_left, 0), (x_left, height), (255, 255, 255), 1)
     cv2.line(frame, (x_right, 0), (x_right, height), (255, 255, 255), 1)
     cv2.putText(frame, "LEFT", (8, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255), 2)
-    cv2.putText(frame, "CENTER", (x_left + 8, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (180, 180, 180), 2)
+    cv2.putText(frame, "BEHIND", (x_left + 8, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (80, 80, 255), 2)
     cv2.putText(frame, "RIGHT", (x_right + 8, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 180, 40), 2)
     note = "MIRRORED" if mirror else "NOT MIRRORED"
     cv2.putText(frame, note, (8, height - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (240, 240, 240), 1)
@@ -468,6 +475,8 @@ def draw_preview(cv2, frame, tracker: SceneTracker, mirror: bool):
         y2 = int(clamp(track.y2, 0, 1) * height)
         if track.emitting and track.side == "left":
             color = (0, 180, 255)
+        elif track.emitting and track.side == "behind":
+            color = (40, 40, 255)
         elif track.emitting and track.side == "right":
             color = (255, 160, 40)
         else:
@@ -504,7 +513,7 @@ def car_message(track_msg: dict) -> dict:
 class Publisher:
     def __init__(self, hub: Hub):
         self.hub = hub
-        self._held_at = {"left": 0.0, "right": 0.0}
+        self._held_at = {"left": 0.0, "behind": 0.0, "right": 0.0}
 
     async def send(self, msg: dict) -> None:
         side = msg["side"]
@@ -535,10 +544,11 @@ def apply_source(hub: Hub, value: str) -> str:
 
 
 def make_tracker(args) -> SceneTracker:
+    left_max, right_min = zone_edges(args.center_width)
     return SceneTracker(
         cal=args.cal,
-        left_max=args.left_zone,
-        right_min=args.right_zone,
+        left_max=left_max,
+        right_min=right_min,
         persist=args.persist,
         min_approach=args.min_approach,
         near_m=args.near,
@@ -703,15 +713,19 @@ def build_parser() -> argparse.ArgumentParser:
         default=True,
         help="flip the frame horizontally (default on: the camera faces backward)",
     )
-    parser.add_argument("--preview", action="store_true", help="window with boxes and left/center/right zones")
+    parser.add_argument("--preview", action="store_true", help="window with boxes and left/behind/right zones")
     parser.add_argument("--synthetic", action="store_true", help="publish a scripted closing car, no camera or model")
     parser.add_argument(
         "--cal",
         default="",
         help="per-class meters at full frame height, e.g. car=3.2,person=3.6",
     )
-    parser.add_argument("--left-zone", type=float, default=LEFT_ZONE, help="cx below this is the rider's left")
-    parser.add_argument("--right-zone", type=float, default=RIGHT_ZONE, help="cx above this is the rider's right")
+    parser.add_argument(
+        "--center-width",
+        type=float,
+        default=CENTER_WIDTH,
+        help="width of the behind band, as a fraction of the frame (default 0.34)",
+    )
     parser.add_argument("--persist", type=int, default=PERSIST_FRAMES, help="consecutive frames before a car is published")
     parser.add_argument("--min-approach", type=float, default=MIN_APPROACH_MPS, help="closing m/s required when the object is not near")
     parser.add_argument("--near", type=float, default=NEAR_M, help="meters; inside this, publish even if the box is not growing")
@@ -736,8 +750,8 @@ def main() -> None:
         raise SystemExit("--fps must be positive")
     if args.persist < 1:
         raise SystemExit("--persist must be at least 1")
-    if not 0.0 < args.left_zone < args.right_zone < 1.0:
-        raise SystemExit("--left-zone and --right-zone must sit between 0 and 1, left first")
+    if not 0.05 <= args.center_width < 1.0:
+        raise SystemExit("--center-width must be from 0.05 up to, but not including, 1")
     if args.near <= 0 or args.max_dist <= 0:
         raise SystemExit("--near and --max-dist must be positive")
     if not 0.0 < args.conf <= 1.0:

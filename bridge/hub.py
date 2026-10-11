@@ -19,7 +19,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 OVERLAY = ROOT / "overlay" / "index.html"
 
-PATTERNS = {"turn_soon", "turn_now", "car_approach", "blue_shell", "combo"}
+PATTERNS = {"turn_soon", "turn_now", "car_approach", "car_behind", "blue_shell", "combo"}
 BUZZ_SIDES = {"left", "right", "both"}
 
 

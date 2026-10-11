@@ -304,7 +304,7 @@ async def play_buzz(cmd: dict) -> None:
     websocket. `cmd` is already validated:
 
         side       "left" | "right" | "both"
-        pattern    turn_soon | turn_now | car_approach | blue_shell | combo
+        pattern    turn_soon | turn_now | car_approach | car_behind | blue_shell | combo
         intensity  float 0..1
 
     The hub has already printed the command. This line is the reminder that

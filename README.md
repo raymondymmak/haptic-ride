@@ -14,7 +14,8 @@ Open [http://127.0.0.1:8641](http://127.0.0.1:8641).
 
 | Key | Action |
 | --- | --- |
-| `A` / `D` | Shoulder check left / right |
+| `A` / `D` | Shoulder check left / right. Either one also counts for a car directly behind |
+| `S` or `W` | Look back. Scores a car in the behind zone |
 | `←` / `→` | Turn left / right |
 | `M` | Tick sounds for the screen recording |
 
@@ -76,13 +77,15 @@ One JSON object per WebSocket text frame. Fields the engine adds (`id`, and the 
 
 ```json
 {"type": "car", "side": "left", "dist": 14.2, "speed": 4.0, "id": "c0-1"}
+{"type": "car", "side": "behind", "dist": 8.0, "speed": 3.0, "id": "cam-behind"}
 {"type": "nav", "turn": "right", "in_m": 18.0, "id": "n0-1"}
 {"type": "shoulder_check", "side": "left"}
+{"type": "look_back"}
 {"type": "turn", "turn": "right"}
 {"type": "mode", "value": "sim"}
 ```
 
-`speed` is closing speed in m/s, positive when the car is approaching. `dist` and `in_m` are meters. `id` lets two cars exist at once; without it the engine treats the side as the id.
+`speed` is closing speed in m/s, positive when the car is approaching. `dist` and `in_m` are meters. `id` lets two cars exist at once; without it the engine treats the side as the id. `side` on a car is `left`, `right`, or `behind` (`center` is accepted as `behind`). A shoulder check on either side scores a behind car. `look_back` scores only that car.
 
 `mode` asks the bridge to change car source. `value` is `sim` or `real`. The bridge answers with the same message, to every client, using the value it actually applied. `hello` also carries `source` (`sim` or `real`) plus `mode` (`fake`, `real`, or `synthetic`), which is which process you joined.
 
@@ -99,6 +102,7 @@ One JSON object per WebSocket text frame. Fields the engine adds (`id`, and the 
 | `turn_soon` | Next turn is inside 45 m |
 | `turn_now` | Next turn is inside 12 m |
 | `car_approach` | Nearest car on that side, closing under 8 m/s |
+| `car_behind` | Car directly behind. One buzz with `side: "both"`, both wrists on the same pulse. Intensity rises as it gets closer |
 | `blue_shell` | Nearest car on that side, closing at 8 m/s or more |
 | `combo` | A scored item, dodge, or drift. Usually `both` |
 
@@ -133,7 +137,7 @@ Pay multiplier is `1 + 0.5 × combo`. The points land, then combo increases by o
 
 | Action | Points |
 | --- | --- |
-| Item box — shoulder check on a side that currently has a car inside 25 m | 100 × pay |
+| Item box — shoulder check on a side that currently has a car inside 25 m, or a look-back (`S` / `W`) on a car directly behind. A left or right check also scores the behind car | 100 × pay |
 | Blue shell dodge — that car is closing at ≥ 8 m/s | 250 × pay |
 | Drift boost — turn input matches the cue while it is NOW | 150 × pay |
 
@@ -218,7 +222,7 @@ Stop `./run.sh` first. It uses ports 8765 and 8641.
 
 The detector is ultralytics YOLO (`yolo11n.pt` by default, `yolov8n.pt` if you pass `--model`). The device is MPS when PyTorch reports it, and CPU if MPS is missing or a call fails. Classes are person, bicycle, car, motorcycle, bus, and truck. The first launch downloads the weights.
 
-Side comes from the box center. The frame is split into thirds (`--left-zone` 0.33, `--right-zone` 0.67). The camera faces backward, so the picture is mirrored by default (`--mirror` / `--no-mirror`) and image-left is the rider's left. A box in the center third shows up in `--preview` only. Each side publishes its nearest qualifying target. If two are within 0.5 m, the one closing faster wins.
+Side comes from the box center. `--center-width` (default `0.34`) is the behind band, centered in the frame, so the edges sit at 0.33 and 0.67. The camera faces backward, so the picture is mirrored by default (`--mirror` / `--no-mirror`) and image-left is the rider's left. Left of the band is `left`, right of it is `right`, and the band itself is published as `side: "behind"`. The overlay draws that car on the center line directly behind the rider arrow and labels the zone BEHIND. Each of the three sides publishes its nearest qualifying target. If two on the same side are within 0.5 m, the one closing faster wins.
 
 Distance is `cal / (bbox height / frame height)`, in meters. The default `cal` is the distance at which that class would fill the frame vertically (a rough 50° webcam): car 3.2, person 3.6, bicycle 2.4, motorcycle 2.6, bus 6.4, truck 6.0. Measure one object at a known distance and set `cal = distance × height_fraction`. Speed is `(previous distance − distance) / frame time`, positive when the box is growing. A car is published only after 3 consecutive frames in which it is closing at `--min-approach` (0.4 m/s) or already inside `--near` (6 m).
 
@@ -249,7 +253,7 @@ Open [http://127.0.0.1:8641](http://127.0.0.1:8641). Phones use `http://<mac-ip>
 ```bash
 python3 bridge/camera_bridge.py --camera 1 --preview
 python3 bridge/camera_bridge.py --camera 0 --preview --no-mirror
-python3 bridge/camera_bridge.py --camera 0 --preview --cal car=4.0,person=3.5
+python3 bridge/camera_bridge.py --camera 0 --preview --center-width 0.34 --cal car=4.0,person=3.5
 python3 bridge/camera_bridge.py --synthetic
 ```
 
@@ -279,6 +283,7 @@ Every LED is dim. `--led-brightness` (0 to 1, default `0.15`) scales the RGB cha
 | `turn_soon` | One short pulse. Amber LED holds a steady glow for about 1.2 s, then turns off |
 | `turn_now` | Rapid pulses, one per blink. Same amber, five blinks at about 6 Hz, at the `--led-brightness` cap |
 | `car_approach` | Continuous vibration. Intensity and frequency (100–250 Hz) rise with `intensity`. Dim red LED, brighter as `intensity` rises |
+| `car_behind` | Both dots pulse on the same beat (one task, not left-then-right). Stronger and quicker as `intensity` rises. Dim red LED on both |
 | `blue_shell` | Strong rapid rumble, a blue pulse on each tick, plus heat (`ThermalMode.MANUAL`) when `device.py` exposes it |
 | `combo` | Quick triple tap. No LED |
 

@@ -35,7 +35,8 @@ disable_all_thermal. LEDs are scaled by --led-brightness (default 0.15).
 turn_soon and turn_now share one amber. Soon holds that color as a steady
 glow for about 1.2 s with one pulse. Now blinks it about five times at 6 Hz
 with a pulse on each blink. car_approach is red, blue_shell pulsing blue.
-combo is a triple tap with no LED. The LED goes off when the pattern ends.
+car_behind pulses both dots together with a dim red LED. combo is a triple
+tap with no LED. The LED goes off when the pattern ends.
 BLE is the C# stack and is not used here.
 """
 
@@ -54,7 +55,7 @@ from typing import Callable, Iterable
 CP210X_VID = 0x10C4
 CP210X_PID = 0xEA60
 
-PATTERNS = ("turn_soon", "turn_now", "car_approach", "blue_shell", "combo")
+PATTERNS = ("turn_soon", "turn_now", "car_approach", "car_behind", "blue_shell", "combo")
 SIDES = ("left", "right", "both")
 
 # The engine resends a held cue about every 0.45 s. Continuous feels hold
@@ -74,11 +75,14 @@ BLUE_SHELL_HZ = 240.0
 BLUE_SHELL_PULSES = 8
 COMBO_HZ = 200.0
 COMBO_TAPS = 3
+BEHIND_PULSES = 4
+BEHIND_HZ = 160.0
 
 TEST_INTENSITY = {
     "turn_soon": 0.45,
     "turn_now": 0.90,
     "car_approach": 0.64,
+    "car_behind": 0.80,
     "blue_shell": 1.0,
     "combo": 1.0,
 }
@@ -94,6 +98,7 @@ LED_NOTE = {
     "turn_soon": "slow amber glow",
     "turn_now": "rapid amber blink",
     "car_approach": "red",
+    "car_behind": "synced red pulses",
     "blue_shell": "pulsing blue",
     "combo": "triple tap, no LED",
 }
@@ -798,6 +803,25 @@ async def pattern_turn_now(chain: Output, intensity: float) -> None:
         await asyncio.sleep(half)
 
 
+async def pattern_car_behind(chains: list[Output], intensity: float) -> None:
+    """Both wrists pulse on the same beat. Closer means a stronger, quicker pulse and a brighter dim red."""
+    gain = clamp(intensity)
+    active = [chain for chain in chains if chain is not None and chain.available()]
+    if not active:
+        return
+    hz = BEHIND_HZ + gain * 40.0
+    on = 0.06 + 0.08 * gain
+    off = 0.12 - 0.06 * gain
+    await asyncio.gather(*(chain.thermal_off() for chain in active))
+    for _ in range(BEHIND_PULSES):
+        await asyncio.gather(*(show_led(chain, 255, 0, 0, gain) for chain in active))
+        await asyncio.gather(*(chain.manual(gain, hz) for chain in active))
+        await asyncio.sleep(on)
+        await asyncio.gather(*(chain.led_off() for chain in active))
+        await asyncio.gather(*(chain.manual(0.0, hz) for chain in active))
+        await asyncio.sleep(off)
+
+
 async def pattern_car_approach(chain: Output, intensity: float) -> None:
     """Continuous rumble. Intensity and frequency follow `intensity`. Dim red LED."""
     gain = clamp(intensity)
@@ -858,10 +882,16 @@ async def pattern_identify_right(chain: Output, _intensity: float) -> None:
         await asyncio.sleep(0.10)
 
 
+async def pattern_car_behind_one(chain: Output, intensity: float) -> None:
+    """One wrist, same pulse as the paired cue, when the other wrist is busy."""
+    await pattern_car_behind([chain], intensity)
+
+
 PATTERN_FNS: dict[str, PatternFn] = {
     "turn_soon": pattern_turn_soon,
     "turn_now": pattern_turn_now,
     "car_approach": pattern_car_approach,
+    "car_behind": pattern_car_behind_one,
     "blue_shell": pattern_blue_shell,
     "combo": pattern_combo,
 }
@@ -882,9 +912,66 @@ class Player:
         self._tasks: dict[str, asyncio.Task | None] = {"left": None, "right": None}
         self._gen = {"left": 0, "right": 0}
         self._pattern = {"left": "", "right": ""}
+        self._sync_task: asyncio.Task | None = None
 
     async def play(self, side: str, pattern: str, intensity: float) -> None:
+        if pattern == "car_behind" and side == "both":
+            await self._play_synced(pattern, intensity)
+            return
         await self.start(side, pattern, PATTERN_FNS[pattern], intensity)
+
+    async def _cancel_open(self) -> None:
+        tasks = []
+        seen: set[int] = set()
+        for task in list(self._tasks.values()) + [self._sync_task]:
+            if task is None or task.done() or id(task) in seen:
+                continue
+            seen.add(id(task))
+            task.cancel()
+            tasks.append(task)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _play_synced(self, name: str, intensity: float) -> None:
+        """One task drives both wrists so the pulses share a clock."""
+        async with self._locks["left"]:
+            async with self._locks["right"]:
+                for side in ("left", "right"):
+                    self._gen[side] += 1
+                    self._pattern[side] = name
+                gens = {side: self._gen[side] for side in ("left", "right")}
+                await self._cancel_open()
+                task = asyncio.create_task(
+                    self._run_synced(name, intensity, gens),
+                    name=f"buzz-both-{name}",
+                )
+                self._sync_task = task
+                self._tasks["left"] = task
+                self._tasks["right"] = task
+
+    async def _run_synced(self, name: str, intensity: float, gens: dict[str, int]) -> None:
+        print(f"buzz  both   {name:13}  {intensity:.2f}  synced", flush=True)
+        chains = [self.outputs[side] for side in ("left", "right")]
+        try:
+            await pattern_car_behind(chains, intensity)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(f"rings  both {name} failed: {exc.__class__.__name__}: {exc}", flush=True)
+        finally:
+            for side, gen in gens.items():
+                if self._gen.get(side) != gen:
+                    continue
+                self._pattern[side] = ""
+                chain = self.outputs.get(side)
+                if chain is None or not chain.available():
+                    continue
+                try:
+                    await chain.idle()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    print(f"rings  {side} idle failed: {exc}", flush=True)
 
     async def start(self, side: str, name: str, fn: PatternFn, intensity: float) -> None:
         sides = ("left", "right") if side == "both" else (side,)
@@ -1022,6 +1109,15 @@ async def run_test(player: Player) -> None:
         await asyncio.sleep(0.35)
     for pattern in PATTERNS:
         intensity = TEST_INTENSITY[pattern]
+        if pattern == "car_behind":
+            print(
+                f"TEST BOTH car_behind  {LED_NOTE[pattern]}  synced",
+                flush=True,
+            )
+            await player.play("both", pattern, intensity)
+            await player.wait()
+            await asyncio.sleep(0.2)
+            continue
         for side in ("left", "right"):
             chain = player.outputs[side]
             if not chain.available():

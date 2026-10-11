@@ -35,9 +35,15 @@ def check_geometry(cam) -> None:
     assert cam.distance_m(0.0, 3.2) == float("inf")
     # A taller box is closer, so the closing speed is positive.
     assert abs(cam.closing_mps(16.0, 12.8, 0.5) - 6.4) < 1e-9
-    assert cam.side_of(0.1, cam.LEFT_ZONE, cam.RIGHT_ZONE) == "left"
-    assert cam.side_of(0.5, cam.LEFT_ZONE, cam.RIGHT_ZONE) == "center"
-    assert cam.side_of(0.9, cam.LEFT_ZONE, cam.RIGHT_ZONE) == "right"
+    left_edge, right_edge = cam.zone_edges(cam.CENTER_WIDTH)
+    assert cam.CENTER_WIDTH == 0.34
+    assert abs(left_edge - 0.33) < 1e-9 and abs(right_edge - 0.67) < 1e-9
+    assert cam.side_of(0.1, left_edge, right_edge) == "left"
+    assert cam.side_of(0.5, left_edge, right_edge) == "behind"
+    assert cam.side_of(0.9, left_edge, right_edge) == "right"
+    narrow_l, narrow_r = cam.zone_edges(0.10)
+    assert cam.side_of(0.50, narrow_l, narrow_r) == "behind"
+    assert cam.side_of(0.40, narrow_l, narrow_r) == "left"
     cal = cam.parse_cal("car=4,person=3.5")
     assert cal["car"] == 4 and cal["person"] == 3.5 and cal["bus"] == cam.DEFAULT_CAL["bus"]
     try:
@@ -48,7 +54,7 @@ def check_geometry(cam) -> None:
         raise AssertionError("unknown class should fail")
     args = cam.build_parser().parse_args([])
     assert args.camera == 0 and args.port == 8765 and args.http_port == 8641
-    assert args.mirror is True and args.persist == 3
+    assert args.mirror is True and args.persist == 3 and args.center_width == 0.34
     assert cam.build_parser().parse_args(["--no-mirror"]).mirror is False
     print("ok  distance, thirds, and --mirror default")
 
@@ -59,24 +65,31 @@ def check_tracks(cam) -> None:
     dt = 0.1
     right = []
     left = []
+    behind = []
     for frame in range(30):
         messages = tracker.update(cam.synthetic_boxes(frame, cal), frame * dt)
-        assert all(msg["side"] in ("left", "right") for msg in messages)
+        assert all(msg["side"] in ("left", "behind", "right") for msg in messages)
         assert all(msg["type"] == "car" and msg["id"] == f"cam-{msg['side']}" for msg in messages)
         for msg in messages:
             if msg["side"] == "right":
                 right.append((frame, msg))
+            elif msg["side"] == "behind":
+                behind.append((frame, msg))
             else:
                 left.append((frame, msg))
         if frame < 3:
             assert messages == []
+    assert behind and behind[0][0] == 3
+    assert all(msg["speed"] >= 2.5 for _frame, msg in behind)
+    assert all(behind[i][1]["dist"] > behind[i + 1][1]["dist"] for i in range(len(behind) - 1))
+    assert all(item[0] < 20 for item in behind)
     assert right and right[0][0] == 3
     assert all(msg["speed"] >= 3.5 for _frame, msg in right)
     assert all(right[i][1]["dist"] > right[i + 1][1]["dist"] for i in range(len(right) - 1))
     assert all(item[0] < 20 for item in right)
     assert left and left[0][0] == 22
     assert all(msg["dist"] <= 6.0 for _frame, msg in left)
-    assert all(msg["dist"] < 20 for _frame, msg in left + right)
+    assert all(msg["dist"] < 20 for _frame, msg in left + right + behind)
 
     # One-frame growth is not a car.
     spike = cam.SceneTracker(cal=cal, persist=3)
@@ -154,7 +167,7 @@ async def check_socket() -> None:
     async with connect(url) as sock:
         hello = json.loads(await asyncio.wait_for(sock.recv(), timeout=3))
         assert hello["type"] == "hello" and hello["source"] == "real" and hello["mode"] == "synthetic"
-        while time.monotonic() < deadline and len(cars) < 4:
+        while time.monotonic() < deadline and (len(cars) < 4 or not saw_nav):
             msg = json.loads(await asyncio.wait_for(sock.recv(), timeout=4))
             if msg.get("type") == "nav":
                 saw_nav = True
@@ -162,7 +175,8 @@ async def check_socket() -> None:
                 cars.append(msg)
     assert saw_nav
     assert len(cars) >= 3
-    assert all(car["side"] in ("left", "right") for car in cars)
+    assert all(car["side"] in ("left", "behind", "right") for car in cars)
+    assert any(car["side"] == "behind" and car["speed"] >= 0.4 for car in cars)
     assert all(car["speed"] >= 0 for car in cars)
     rights = [car for car in cars if car["side"] == "right"]
     assert any(car["speed"] >= 0.4 for car in rights)

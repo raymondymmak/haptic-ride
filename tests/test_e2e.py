@@ -79,7 +79,46 @@ def check_rules(game_mod) -> None:
     missed.on_nav({"type": "nav", "turn": "right", "in_m": 40, "id": "next"})
     assert missed.misses == 2
     assert missed.combo == 0
+
+    behind = game_mod.Game()
+    behind.now = 5
+    behind.on_nav({"type": "nav", "turn": "left", "in_m": 20, "id": "n"})
+    behind.on_car({"type": "car", "side": "behind", "dist": 8, "speed": 3, "id": "back"})
+    rings = behind.rings()
+    assert rings["left"]["pattern"] == "car_behind" and rings["right"]["pattern"] == "car_behind"
+    assert rings["left"]["intensity"] > behind_far_intensity(game_mod)
+    assert game_mod.buzz_plan(rings) == [("both", rings["left"])]
+    assert behind.on_check("left") == game_mod.BASE_ITEM
+
+    other = game_mod.Game()
+    other.now = 1
+    other.on_car({"type": "car", "side": "behind", "dist": 9, "speed": 3, "id": "b"})
+    assert other.on_check("right") == game_mod.BASE_ITEM
+
+    look = game_mod.Game()
+    look.now = 1
+    look.on_car({"type": "car", "side": "center", "dist": 6, "speed": 9, "id": "b"})
+    assert look.cars["b"]["side"] == "behind"
+    assert game_mod.handle(look, {"type": "look_back"}) == game_mod.BASE_DODGE
+
+    mixed = game_mod.Game()
+    mixed.now = 1
+    mixed.on_car({"type": "car", "side": "left", "dist": 12, "speed": 3, "id": "L"})
+    mixed.on_car({"type": "car", "side": "behind", "dist": 8, "speed": 3, "id": "B"})
+    mixed_rings = mixed.rings()
+    assert mixed_rings["left"]["pattern"] == "car_approach"
+    assert mixed_rings["right"]["pattern"] == "car_behind"
+    assert [side for side, _cmd in game_mod.buzz_plan(mixed_rings)] == ["left", "right"]
+    assert mixed.on_check("left") == game_mod.BASE_ITEM
+    assert mixed.cars["B"]["scored"] is False
+    assert mixed.on_check("right") == int(game_mod.BASE_ITEM * 1.5)
     print("ok  scoring rules")
+
+
+def behind_far_intensity(game_mod) -> float:
+    far = game_mod.Game()
+    far.on_car({"type": "car", "side": "behind", "dist": 20, "speed": 3, "id": "back"})
+    return far.rings()["left"]["intensity"]
 
 
 class Proc:
@@ -153,7 +192,7 @@ async def score_against_replay(port: int) -> None:
     assert seen[-1]["type"] == "state"
     assert seen[-1]["score"] == 825
     for buzz in buzzes:
-        assert buzz["pattern"] in {"turn_soon", "turn_now", "car_approach", "blue_shell", "combo"}
+        assert buzz["pattern"] in {"turn_soon", "turn_now", "car_approach", "car_behind", "blue_shell", "combo"}
         assert 0 <= float(buzz["intensity"]) <= 1
     print("ok  replay scores item, dodge, and drift")
 
@@ -163,6 +202,8 @@ async def live_sim(ws_port: int, http_port: int) -> None:
     assert "HAPTIC RIDE" in page
     assert "navigator.vibrate" in page
     assert "mode-sim" in page and "Simulated" in page and "Real" in page
+    assert "look back" in page and "k-look-back" in page
+    assert "BEHIND" in page and "car_behind" in page
     assert "__WS_PORT__" not in page
     assert f'"{ws_port}"' in page
 

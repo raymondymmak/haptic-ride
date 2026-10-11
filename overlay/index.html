@@ -295,6 +295,22 @@
     z-index: 2;
     filter: drop-shadow(0 3px 4px rgba(0,0,0,0.65));
   }
+  .zones { position: absolute; inset: 0; pointer-events: none; z-index: 1; }
+  .zone {
+    position: absolute;
+    top: 22%;
+    font-size: 11px;
+    letter-spacing: 0.16em;
+    color: rgba(244, 241, 234, 0.42);
+  }
+  .zone-left { left: 18%; }
+  .zone-behind {
+    left: 50%;
+    top: 20%;
+    transform: translateX(-50%);
+    color: #ff8d8d;
+  }
+  .zone-right { right: 18%; }
   .ticks {
     position: absolute;
     left: 10px;
@@ -342,6 +358,7 @@
   }
   .dot.blue span { transform: rotate(-45deg); display: inline-block; }
   .dot.near { width: 18px; height: 18px; margin: -9px 0 0 -9px; }
+  .dot.behind { background: #ff5a4a; box-shadow: 0 0 16px #ff5a4a; }
 
   .toast {
     position: absolute;
@@ -530,6 +547,11 @@
               <path d="M24 2 L44 45 L24 35 L4 45 Z" fill="#f4f1ea" stroke="#ffe08a" stroke-width="2" stroke-linejoin="round"/>
             </svg>
           </div>
+          <div class="zones" aria-hidden="true">
+            <span class="zone zone-left">LEFT</span>
+            <span class="zone zone-behind">BEHIND</span>
+            <span class="zone zone-right">RIGHT</span>
+          </div>
           <div class="ticks"><span>close</span><span>15m</span><span>far</span></div>
           <div id="dots"></div>
           <div class="radar-label" id="car-count">REAR RADAR</div>
@@ -549,6 +571,7 @@
     <footer>
       <div class="keys">
         <button type="button" data-act="check-left" id="k-check-left"><kbd>A</kbd><span>check left</span></button>
+        <button type="button" data-act="look-back" id="k-look-back"><kbd>S</kbd><span>look back</span></button>
         <button type="button" data-act="check-right" id="k-check-right"><kbd>D</kbd><span>check right</span></button>
         <button type="button" data-act="turn-left" id="k-turn-left"><kbd>←</kbd><span>turn left</span></button>
         <button type="button" data-act="turn-right" id="k-turn-right"><kbd>→</kbd><span>turn right</span></button>
@@ -565,6 +588,7 @@ const LABEL = {
   turn_soon: "SOON",
   turn_now: "NOW",
   car_approach: "CAR",
+  car_behind: "BEHIND",
   blue_shell: "SHELL",
   combo: "COMBO",
 };
@@ -572,12 +596,14 @@ const COLOR = {
   turn_soon: "#ffb020",
   turn_now: "#ff4d1a",
   car_approach: "#ff3355",
+  car_behind: "#ff5a4a",
   blue_shell: "#4d8dff",
   combo: "#ffe08a",
 };
 const VIBE = {
   turn_soon: [30, 110, 30],
   turn_now: [80, 50, 80, 50, 140],
+  car_behind: [50, 60, 50, 60, 50, 60, 50],
   blue_shell: [16, 22, 16, 22, 16, 22, 16, 22, 180],
   combo: [36, 28, 36, 28, 36, 28, 160],
 };
@@ -646,10 +672,12 @@ function send(msg) {
 function act(name) {
   if (name === "check-left") send({ type: "shoulder_check", side: "left" });
   if (name === "check-right") send({ type: "shoulder_check", side: "right" });
+  if (name === "look-back") send({ type: "look_back" });
   if (name === "turn-left") send({ type: "turn", turn: "left" });
   if (name === "turn-right") send({ type: "turn", turn: "right" });
-  if (name.startsWith("check")) logLine("check " + name.split("-")[1]);
-  if (name.startsWith("turn")) logLine("turn " + name.split("-")[1]);
+  if (name === "look-back") logLine("look back");
+  else if (name.startsWith("check")) logLine("check " + name.split("-")[1]);
+  else if (name.startsWith("turn")) logLine("turn " + name.split("-")[1]);
   const btn = document.getElementById("k-" + name);
   if (!btn) return;
   btn.classList.add("pressed");
@@ -673,7 +701,7 @@ function blip(pattern) {
   audioCtx = ctx;
   const osc = ctx.createOscillator();
   const gain = ctx.createGain();
-  const freq = { turn_soon: 520, turn_now: 740, car_approach: 160, blue_shell: 90, combo: 880 };
+  const freq = { turn_soon: 520, turn_now: 740, car_approach: 160, car_behind: 140, blue_shell: 90, combo: 880 };
   osc.frequency.value = freq[pattern] || 330;
   osc.type = pattern === "blue_shell" || pattern === "car_approach" ? "square" : "sine";
   gain.gain.value = 0.045;
@@ -707,7 +735,8 @@ function paintRing(side, checks) {
   root.style.setProperty("--c", color);
   document.getElementById("pat-" + side).textContent = pat ? LABEL[pat] : "QUIET";
   document.getElementById("int-" + side).textContent = cmd ? Number(cmd.intensity).toFixed(2) : "0.00";
-  document.getElementById("badge-" + side).hidden = !(checks || []).includes(side);
+  const list = checks || [];
+  document.getElementById("badge-" + side).hidden = !(list.includes(side) || list.includes("behind"));
   const glow = document.getElementById("glow-" + side);
   glow.style.opacity = cmd ? String(Math.min(0.95, 0.12 + Number(cmd.intensity) * 0.8)) : "0";
   glow.style.setProperty("--c", color);
@@ -737,9 +766,11 @@ function paintRadar() {
     const dot = document.createElement("div");
     const dist = Math.max(0, Math.min(32, Number(car.dist) || 0));
     dot.className = "dot" + (car.blue ? " blue" : "") + (dist < 8 ? " near" : "");
+    const behind = car.side === "behind" || car.side === "center";
+    if (behind) dot.classList.add("behind");
     let hash = 0;
     for (const ch of String(car.id || car.side)) hash = (hash * 33 + ch.charCodeAt(0)) % 5;
-    const x = (car.side === "left" ? 36 : 64) + (hash - 2) * 3.4;
+    const x = behind ? 50 : (car.side === "left" ? 36 : 64) + (hash - 2) * 3.4;
     dot.style.top = (16 + (dist / 32) * 74) + "%";
     dot.style.left = x + "%";
     const label = document.createElement("span");
@@ -800,11 +831,14 @@ function paintFlash(flash) {
 }
 
 function paintHot(checks, needTurn, nav) {
+  const list = checks || [];
+  const behind = list.includes("behind");
   for (const side of ["left", "right"]) {
-    document.getElementById("k-check-" + side).classList.toggle("hot", (checks || []).includes(side));
+    document.getElementById("k-check-" + side).classList.toggle("hot", list.includes(side) || behind);
     const turnHot = !!(needTurn && nav && nav.turn === side);
     document.getElementById("k-turn-" + side).classList.toggle("hot", turnHot);
   }
+  document.getElementById("k-look-back").classList.toggle("hot", behind);
 }
 
 function onState(msg) {
@@ -833,6 +867,15 @@ function onBuzz(msg) {
     setTimeout(() => document.body.classList.remove("combo"), 450);
     vibrate("both", msg);
     logLine("buzz both combo 1.00");
+    return;
+  }
+  if (msg.pattern === "car_behind" && msg.side === "both") {
+    rings.left = { pattern: msg.pattern, intensity: msg.intensity };
+    rings.right = { pattern: msg.pattern, intensity: msg.intensity };
+    paintRing("left", lastChecks);
+    paintRing("right", lastChecks);
+    vibrate("both", msg);
+    logLine("buzz both car_behind " + Number(msg.intensity).toFixed(2));
     return;
   }
   if (msg.side === "left" || msg.side === "right") {
@@ -893,7 +936,7 @@ window.addEventListener("keydown", (ev) => {
   if (ev.repeat) return;
   const key = ev.key.toLowerCase();
   if (key === "m") { toggleSound(); ev.preventDefault(); return; }
-  const map = { a: "check-left", d: "check-right", arrowleft: "turn-left", arrowright: "turn-right" };
+  const map = { a: "check-left", d: "check-right", s: "look-back", w: "look-back", arrowleft: "turn-left", arrowright: "turn-right" };
   const name = map[key];
   if (!name) return;
   ev.preventDefault();
