@@ -369,7 +369,7 @@ python3 rings/datafeel_rings.py --url ws://VM_IP:8765
 
 The Wave is input only. It does not buzz. `rings/datafeel_rings.py` still plays every cue. The Wave publishes rider gestures on the same bridge websocket.
 
-A turn is a sustained heading change, about 45–90 degrees over 1–3 seconds. The tracker follows Wave euler yaw (radians), smooths it, and uses gyro yaw rate around gravity as a second view in `--print`. While the ring is straight (yaw rate under about 12 °/s for half a second) the heading zero recenters, so slow drift does not become a fake turn. Crossing the turn angle inside the window publishes one cue:
+A turn is about 45 degrees of world yaw over 0.7–3 seconds. The tracker integrates the gyro axis about gravity: the Wave pose quaternion rotates the bias-corrected gyro into the world and the vertical component is yaw; with no pose, that axis is the accelerometer gravity vector. Euler yaw is not the heading. The ring's euler can sit at 0 while this integral moves, which is what `--print` shows as `int`. Recentering only happens once the ring is straight again. It does not run while a turn is in progress, so a slow start is not wiped back to 0. Crossing the turn angle inside the window publishes one cue:
 
 ```json
 {"type": "turn", "turn": "left", "side": "left"}
@@ -386,13 +386,26 @@ The middle button click is the same dismiss. The bottom button click is `look_ba
 ```bash
 python3 -m pip install -r requirements.txt
 python3 rings/wave_input.py --discover
-python3 rings/wave_input.py --addr D5:73:DB:85:B4:A1 --print
-python3 rings/wave_input.py --addr D5:73:DB:85:B4:A1 --calibrate
-python3 rings/wave_input.py --addr D5:73:DB:85:B4:A1 --url ws://127.0.0.1:8765
+python3 rings/wave_input.py --addr EAED7675-7521-9A23-1011-6090ADC792C9 --print
+python3 rings/wave_input.py --addr EAED7675-7521-9A23-1011-6090ADC792C9 --calibrate
+python3 rings/wave_input.py --addr EAED7675-7521-9A23-1011-6090ADC792C9 --url ws://127.0.0.1:8765
 python3 rings/wave_input.py --left-addr AA:AA:AA:AA:AA:AA --right-addr BB:BB:BB:BB:BB:BB
 ```
 
-`--print` streams `yaw`, `rate`, `gyro`, and `yaw_gyro` so the thresholds can be tuned on the bike. `--calibrate` records about two seconds of stillness (neutral yaw and gyro bias) into `logs/wave_cal.json` and exits. Flags: `--turn-deg` (default 60), `--turn-min-s` (1), `--turn-max-s` (3), `--flick-dps` (180), `--flick-g` (1.6), `--flick-max-s` (0.35), `--straight-dps` (12), `--straight-s` (0.5).
+On macOS, `--discover` prints a CoreBluetooth UUID, not a MAC address. Pass that UUID to `--addr`.
+
+`run_asyncio_bluetooth` starts reading at the same moment it starts connecting, and its consumer gives up after 10 seconds with `Failed to receive valid package in 10 seconds, exiting consumer`. CoreBluetooth often takes longer than that. The consumer then sets cancel, so the later `Connected to Wave` line is followed immediately by `Recieved a cancel signal, stopping ble client`. Notifications and the `DeviceMode.API` write do run, but only after that timer has already fired, so no datastream is delivered.
+
+The live path turns notifications on, writes the device-info request, writes `DeviceMode.API`, writes the motion-data config, and only then starts a 30 second package timer (`--packet-timeout`). Each step is logged with the seconds since connect started. If nothing arrives, it says whether any GATT notifies showed up and reconnects (`--reconnect-s`, default 2). `--connect-timeout` (default 40) is how long Bleak may spend connecting.
+
+`--raw-test` runs the official example with no extra logic, so a failure there is the library timer and a success on `--print` is this client:
+
+```bash
+python3 rings/wave_input.py --addr EAED7675-7521-9A23-1011-6090ADC792C9 --raw-test
+python3 rings/wave_input.py --addr EAED7675-7521-9A23-1011-6090ADC792C9 --print
+```
+
+`--print` streams `int` (integrated heading, degrees), `turn` (degrees since the last straight pose), `rate`, `gyro`, and `yaw_gyro` so the heading can be watched while the wrist turns. `--calibrate` records about two seconds of stillness (neutral yaw and gyro bias) into `logs/wave_cal.json` once packets are flowing, and exits. The bias is subtracted before the yaw rate is integrated. Flags: `--turn-deg` (default 45), `--turn-min-s` (0.7), `--turn-max-s` (3), `--flick-dps` (180), `--flick-g` (1.6), `--flick-max-s` (0.35), `--straight-dps` (8), `--straight-s` (0.5).
 
 Turn the ring on with the middle button. It must not already be connected to Softwave or to the Mac, because bleak can only open a free device. On Linux, if the adapter grabs it, `bluetoothctl disconnect` first. If you Ctrl-C and the ring sticks in a bad session, hold the top button for a few seconds. macOS Apple Silicon uses the same virtualenv as the rest of the repo. `genki-wave` is on PyPI and talks BLE through bleak.
 

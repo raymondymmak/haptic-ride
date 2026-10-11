@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 """Genki Wave as rider input. The Wave has no haptics; the DataFeel dots play.
 
-A real turn is a sustained heading change, about 45–90 degrees over 1–3
-seconds. That publishes ``{"type": "turn", "turn": "left|right", "side": ...}``.
+A real turn is about 45 degrees of world yaw over 0.7–3 seconds, integrated
+from the gyro about gravity. That publishes ``{"type": "turn", "turn": "left|right", "side": ...}``.
 A quick wrist flick (a short gyro or accel spike, or the Wave's own peak
 flag) is not a turn. It publishes ``{"type": "dismiss"}`` so the engine
 scores the car warning and the ring client cuts that buzz.
 
     python3 rings/wave_input.py --discover
-    python3 rings/wave_input.py --addr D5:73:DB:85:B4:A1 --print
-    python3 rings/wave_input.py --addr D5:73:DB:85:B4:A1 --calibrate
-    python3 rings/wave_input.py --addr D5:73:DB:85:B4:A1
-    python3 rings/wave_input.py --left-addr AA:AA:AA:AA:AA:AA --right-addr BB:BB:BB:BB:BB:BB
+    python3 rings/wave_input.py --addr EAED7675-7521-9A23-1011-6090ADC792C9 --print
+    python3 rings/wave_input.py --addr EAED7675-7521-9A23-1011-6090ADC792C9 --calibrate
+    python3 rings/wave_input.py --addr EAED7675-7521-9A23-1011-6090ADC792C9 --raw-test
+
+macOS reports the Wave as a CoreBluetooth UUID, not a MAC address. The
+receive timer starts only after notifications are on and DeviceMode.API has
+been written. ``--raw-test`` runs the library example unchanged, including
+its 10 second timer that starts in parallel with connect.
 
 The ring must not already be connected (Softwave, system Bluetooth, or a
 stuck session). After an unclean exit, hold the top button a few seconds.
@@ -34,11 +38,13 @@ DEFAULT_CAL = ROOT / "logs" / "wave_cal.json"
 # Wave euler angles are radians. Its gyro in the public samples is degrees
 # per second (a still ring reports tens, while yaw barely moves). Accel is
 # in g. Linear accel is gravity removed.
-TURN_DEG = 60.0
-TURN_MIN_S = 1.0
+TURN_DEG = 45.0
+TURN_MIN_S = 0.7
 TURN_MAX_S = 3.0
 DEADBAND_DEG = 8.0
-STRAIGHT_DPS = 12.0
+# Below this, a still ring's leftover bias can recenter. A real turn of 45°
+# in 3s averages 15°/s, so it stays above this and is not wiped.
+STRAIGHT_DPS = 8.0
 STRAIGHT_S = 0.5
 TAU_HEADING_S = 0.12
 TAU_RATE_S = 0.08
@@ -52,7 +58,14 @@ SUSTAINED_S = 0.4
 SUSTAINED_DEG = 15.0
 CAL_STILL_DPS = 25.0
 CAL_HOLD_S = 2.0
+CAL_WAIT_S = 90.0
 PRINT_EVERY_S = 0.2
+# macOS CoreBluetooth often spends more than 10s inside BleakClient. The
+# library example starts its 10s receive timer at the same moment as connect,
+# so the timer fires before DeviceMode.API is written and then cancels the link.
+CONNECT_TIMEOUT_S = 40.0
+PACKET_TIMEOUT_S = 30.0
+RECONNECT_S = 2.0
 
 
 def wrap_deg(delta: float) -> float:
@@ -66,7 +79,7 @@ def _hypot3(value) -> float:
 
 @dataclass
 class Sample:
-    """One IMU frame. `yaw_rad` is Wave euler yaw. Gyro is degrees per second."""
+    """One IMU frame. Gyro is degrees per second. `quat` is (w, x, y, z) body-to-world."""
 
     t: float
     yaw_rad: float
@@ -75,6 +88,42 @@ class Sample:
     linacc: tuple[float, float, float] = (0.0, 0.0, 0.0)
     peak: bool = False
     peak_norm: float = 0.0
+    quat: tuple[float, float, float, float] | None = None
+
+
+def rotate_body_to_world(quat: tuple[float, float, float, float], vector: tuple[float, float, float]):
+    """Rotate a body-frame vector by the Wave pose. None if the quaternion is empty."""
+    w, x, y, z = quat
+    norm = math.sqrt(w * w + x * x + y * y + z * z)
+    if norm < 1e-6:
+        return None
+    w, x, y, z = w / norm, x / norm, y / norm, z / norm
+    vx, vy, vz = vector
+    tx = 2.0 * (y * vz - z * vy)
+    ty = 2.0 * (z * vx - x * vz)
+    tz = 2.0 * (x * vy - y * vx)
+    return (
+        vx + w * tx + (y * tz - z * ty),
+        vy + w * ty + (z * tx - x * tz),
+        vz + w * tz + (x * ty - y * tx),
+    )
+
+
+def world_yaw_dps(sample: Sample, bias: tuple[float, float, float] = (0.0, 0.0, 0.0)) -> float:
+    """Degrees per second about world up.
+
+    The pose quaternion rotates the bias-corrected gyro into the world. Its Z
+    axis is yaw. With no pose, the same axis is gravity from the accelerometer.
+    """
+    gyro = tuple(axis - off for axis, off in zip(sample.gyro, bias))
+    if sample.quat is not None:
+        world = rotate_body_to_world(sample.quat, gyro)
+        if world is not None:
+            return world[2]
+    mag = _hypot3(sample.grav)
+    if mag < 0.2:
+        return 0.0
+    return (gyro[0] * sample.grav[0] + gyro[1] * sample.grav[1] + gyro[2] * sample.grav[2]) / mag
 
 
 def button_gesture(button: str, action: str, hand: str | None = None) -> dict | None:
@@ -92,11 +141,12 @@ def button_gesture(button: str, action: str, hand: str | None = None) -> dict | 
 
 
 class GestureTracker:
-    """Heading from orientation, flick from a short gyro or accel spike.
+    """Heading from integrated world-yaw gyro. A flick is a short spike.
 
-    While the rider is straight, heading is recentered so slow drift never
-    grows into a fake turn. A turn arms when heading leaves a small deadband
-    and fires once the change reaches `turn_deg` inside the time window.
+    Euler yaw from the ring can sit at 0 while the gyro still turns, so the
+    angle is the integral of the world-yaw rate. Recentering runs only after
+    the ring is straight again. It does not run while a turn is in progress,
+    or the integral would be wiped back to 0.
     """
 
     def __init__(
@@ -137,8 +187,6 @@ class GestureTracker:
         self._gyro_mag = 0.0
         self._yaw_gyro = 0.0
         self._t: float | None = None
-        self._raw = 0.0
-        self._unwrapped = 0.0
         self.origin = 0.0
         self._straight_for = 0.0
         self.turn_t0: float | None = None
@@ -149,10 +197,12 @@ class GestureTracker:
         self._last_dismiss = -1e9
 
     def preview(self) -> str:
-        delta = self.heading - self.origin
+        # `int` is the running integral and is not reset by recenter.
+        # `turn` is the angle since the last straight pose, which the cue uses.
         return (
-            f"yaw {delta:+6.1f}°  rate {self.rate:+6.1f}°/s  "
-            f"gyro {self._gyro_mag:5.0f}°/s  yaw_gyro {self._yaw_gyro:+6.1f}°/s"
+            f"int {self.heading:+7.1f}°  turn {self._delta():+6.1f}°  "
+            f"rate {self.rate:+6.1f}°/s  gyro {self._gyro_mag:5.0f}°/s  "
+            f"yaw_gyro {self._yaw_gyro:+6.1f}°/s"
         )
 
     def update(self, sample: Sample) -> list[dict]:
@@ -174,15 +224,8 @@ class GestureTracker:
         return events
 
     def _reset(self, sample: Sample) -> None:
-        yaw = math.degrees(sample.yaw_rad)
-        self._raw = yaw
-        self._unwrapped = yaw
-        self.heading = yaw
-        if self.neutral_yaw_rad is None:
-            self.origin = yaw
-        else:
-            neutral = math.degrees(self.neutral_yaw_rad)
-            self.origin = yaw - wrap_deg(yaw - neutral)
+        self.heading = 0.0
+        self.origin = 0.0
         self.rate = 0.0
         self._t = sample.t
         self._straight_for = 0.0
@@ -192,27 +235,15 @@ class GestureTracker:
         self._note_gyro(sample)
 
     def _note_gyro(self, sample: Sample) -> None:
-        gyro = tuple(axis - bias for axis, bias in zip(sample.gyro, self.gyro_bias))
-        self._gyro_mag = _hypot3(gyro)
-        grav = _hypot3(sample.grav)
-        if grav < 0.2:
-            self._yaw_gyro = 0.0
-        else:
-            self._yaw_gyro = (
-                gyro[0] * sample.grav[0] + gyro[1] * sample.grav[1] + gyro[2] * sample.grav[2]
-            ) / grav
+        corrected = tuple(axis - bias for axis, bias in zip(sample.gyro, self.gyro_bias))
+        self._gyro_mag = _hypot3(corrected)
+        self._yaw_gyro = world_yaw_dps(sample, self.gyro_bias)
 
     def _integrate(self, sample: Sample, dt: float) -> None:
-        raw = math.degrees(sample.yaw_rad)
-        self._unwrapped += wrap_deg(raw - self._raw)
-        self._raw = raw
-        alpha = 1.0 - math.exp(-dt / self.tau_heading)
-        previous = self.heading
-        self.heading += alpha * (self._unwrapped - self.heading)
-        inst = (self.heading - previous) / dt
-        rate_alpha = 1.0 - math.exp(-dt / self.tau_rate)
-        self.rate += rate_alpha * (inst - self.rate)
         self._note_gyro(sample)
+        alpha = 1.0 - math.exp(-dt / self.tau_rate)
+        self.rate += alpha * (self._yaw_gyro - self.rate)
+        self.heading += self.rate * dt
 
     def _delta(self) -> float:
         return self.heading - self.origin
@@ -271,11 +302,15 @@ class GestureTracker:
         return [{"type": "turn", "turn": side, "side": side}]
 
     def _straight(self, dt: float) -> None:
-        if abs(self.rate) <= self.straight_dps:
-            self._straight_for += dt
-        else:
+        # Leave the origin alone until this turn either fires or is abandoned.
+        # Recentering here is what held the printed yaw at 0 on the ring.
+        if self.turn_armed and abs(self._delta()) >= DEADBAND_DEG:
             self._straight_for = 0.0
             return
+        if abs(self.rate) > self.straight_dps:
+            self._straight_for = 0.0
+            return
+        self._straight_for += dt
         if self._straight_for < self.straight_s:
             return
         self.origin = self.heading
@@ -380,19 +415,25 @@ def _component(value, name: str, index: int) -> float:
 def sample_from_package(data, t_fallback: float) -> Sample | None:
     euler = getattr(data, "euler", None)
     gyro = getattr(data, "gyro", None)
-    if euler is None or gyro is None:
+    if gyro is None:
         return None
     timestamp = getattr(data, "timestamp_us", None)
     t = float(timestamp) / 1e6 if timestamp else t_fallback
     grav = getattr(data, "grav", None)
     if grav is None:
-        grav = (0.0, 0.0, 1.0)
+        acc = getattr(data, "acc", None)
+        grav = acc if acc is not None else (0.0, 0.0, 1.0)
     linacc = getattr(data, "linacc", None)
     if linacc is None:
         linacc = (0.0, 0.0, 0.0)
+    pose = getattr(data, "current_pose", None)
+    quat = None
+    if pose is not None and all(hasattr(pose, name) for name in ("w", "x", "y", "z")):
+        quat = (float(pose.w), float(pose.x), float(pose.y), float(pose.z))
+    yaw = float(getattr(euler, "yaw", 0.0) or 0.0) if euler is not None else 0.0
     return Sample(
         t=t,
-        yaw_rad=float(getattr(euler, "yaw")),
+        yaw_rad=yaw,
         gyro=(
             _component(gyro, "x", 0),
             _component(gyro, "y", 1),
@@ -410,6 +451,7 @@ def sample_from_package(data, t_fallback: float) -> Sample | None:
         ),
         peak=bool(getattr(data, "peak", False)),
         peak_norm=float(getattr(data, "peak_norm_velocity", 0.0) or 0.0),
+        quat=quat,
     )
 
 
@@ -464,26 +506,32 @@ def _waves(args) -> list[tuple[str, str | None]]:
 
 def _import_wave():
     try:
-        from genki_wave.asyncio_runner import consumer, producer_bluetooth
         from genki_wave.callbacks import WaveCallback
+        from genki_wave.constants import API_CHAR_UUID
         from genki_wave.data.enums import ButtonAction, ButtonId
         from genki_wave.data.organization import ButtonEvent, DataPackage
+        from genki_wave.data.writing import (
+            get_default_api_config_package,
+            get_device_info_request,
+            get_start_api_package,
+        )
         from genki_wave.discover import discover_bluetooth
-        from genki_wave.protocols import CommunicateCancel, ProtocolAsyncio
+        from genki_wave.protocols import ProtocolAsyncio
     except ImportError as exc:
         raise SystemExit(
             "genki-wave is not installed. In this venv: python3 -m pip install genki-wave"
         ) from exc
     return {
-        "consumer": consumer,
-        "producer_bluetooth": producer_bluetooth,
         "WaveCallback": WaveCallback,
+        "API_CHAR_UUID": API_CHAR_UUID,
         "ButtonAction": ButtonAction,
         "ButtonId": ButtonId,
         "ButtonEvent": ButtonEvent,
         "DataPackage": DataPackage,
+        "device_info": get_device_info_request,
+        "start_api": get_start_api_package,
+        "api_config": get_default_api_config_package,
         "discover_bluetooth": discover_bluetooth,
-        "CommunicateCancel": CommunicateCancel,
         "ProtocolAsyncio": ProtocolAsyncio,
     }
 
@@ -533,22 +581,130 @@ def _make_callback(api, tracker: GestureTracker, queue: asyncio.Queue, samples: 
     return Callback()
 
 
-async def _connect_one(api, address: str, hand: str | None, args, queue: asyncio.Queue, samples: list[Sample] | None):
+async def arm_and_read(client, char_uuid, notify_cb, writes, queue, on_package, timeout, log, stop) -> str:
+    """Enable notify and send the API writes, then wait for a package.
+
+    The receive timeout starts only after those writes. Starting it in
+    parallel with BleakClient, the way ``run_asyncio_bluetooth`` does, cancels
+    a macOS connect that takes longer than 10 seconds.
+    """
+    log("notify on")
+    await client.start_notify(char_uuid, notify_cb)
+    for label, payload in writes:
+        log(f"sent {label}")
+        await client.write_gatt_char(char_uuid, payload, False)
+    log(f"api armed; waiting up to {timeout:.0f}s for a package")
+    while not stop.is_set():
+        try:
+            package = await asyncio.wait_for(queue.get(), timeout)
+        except TimeoutError:
+            log("timeout")
+            return "timeout"
+        if on_package(package):
+            return "package"
+    return "stopped"
+
+
+def _address_note(address: str) -> str:
+    if address.count("-") >= 4:
+        return f"{address}  (macOS CoreBluetooth UUID)"
+    return address
+
+
+async def _one_session(api, address, callback, timeout_connect, timeout_packet, log, stop) -> str:
+    from bleak import BleakClient
+
+    protocol = api["ProtocolAsyncio"]()
+    counts = {"notify": 0, "package": 0}
+
+    async def on_notify(_sender, data) -> None:
+        counts["notify"] += 1
+        if counts["notify"] <= 3:
+            log(f"gatt notify {counts['notify']}  {len(data)} bytes")
+        await protocol.data_received(data)
+
+    def on_package(package) -> bool:
+        counts["package"] += 1
+        if counts["package"] <= 5:
+            log(f"package {counts['package']}  {type(package).__name__}")
+        callback(package)
+        return False
+
+    log(f"connecting {_address_note(address)}  bleak timeout {timeout_connect:.0f}s")
+    log("receive timer stays off until notify is on and DeviceMode.API is written")
+    writes = [
+        ("device-info request", api["device_info"]()),
+        ("DeviceMode.API", api["start_api"]()),
+        ("MOTION_DATA config", api["api_config"]()),
+    ]
+
+    def on_disconnect(client) -> None:
+        log(f"link dropped {getattr(client, 'address', address)}")
+
+    async with BleakClient(address, timeout=timeout_connect, disconnected_callback=on_disconnect) as client:
+        log("ble connected")
+        status = await arm_and_read(
+            client,
+            api["API_CHAR_UUID"],
+            on_notify,
+            writes,
+            protocol.queue,
+            on_package,
+            timeout_packet,
+            log,
+            stop,
+        )
+        try:
+            await client.stop_notify(api["API_CHAR_UUID"])
+        except Exception:
+            pass
+    if status == "timeout":
+        log(
+            f"no package for {timeout_packet:.0f}s after DeviceMode.API  "
+            f"notifies={counts['notify']}  decoded={counts['package']}"
+        )
+        if counts["notify"] == 0:
+            log("no GATT notifications. Close Softwave. If the ring is stuck, hold the top button a few seconds.")
+        elif counts["package"] == 0:
+            log("notifications arrived but none decoded. The ring may be in a mode other than API motion data.")
+    return status
+
+
+async def _stream_forever(api, address, hand, args, queue, samples, stop) -> None:
     entry = None if args.calibrate else load_cal(Path(args.cal), address)
     if entry:
         print(f"wave  cal {address}  bias {[round(v, 2) for v in entry.get('gyro_bias', [])]}", flush=True)
     tracker = tracker_from_cal(hand, args, entry)
     callback = _make_callback(api, tracker, queue, samples, args.print_ and not args.calibrate)
-    protocol = api["ProtocolAsyncio"]()
-    comm = api["CommunicateCancel"]()
-    producer = api["producer_bluetooth"](
-        protocol,
-        comm,
-        address,
-        enable_spectrogram=False,
-    )
-    consume = api["consumer"](protocol, comm, [callback])
-    return producer, consume, comm
+    attempt = 0
+    while not stop.is_set():
+        attempt += 1
+        started = time.monotonic()
+
+        def log(message: str, _started=started) -> None:
+            print(f"wave  {address}  {message}  ({time.monotonic() - _started:.1f}s)", flush=True)
+
+        try:
+            status = await _one_session(
+                api, address, callback, args.connect_timeout, args.packet_timeout, log, stop
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(f"wave  {address}  {exc.__class__.__name__}: {exc}", flush=True)
+            status = "error"
+        if stop.is_set() or status == "stopped":
+            return
+        print(
+            f"wave  {address}  {status}; reconnect {attempt} in {args.reconnect_s:.0f}s. "
+            "Hold the top button a few seconds if the ring stays connected.",
+            flush=True,
+        )
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=args.reconnect_s)
+            return
+        except TimeoutError:
+            continue
 
 
 async def _pump(queue: asyncio.Queue, bus: Bus | None) -> None:
@@ -561,11 +717,15 @@ async def _pump(queue: asyncio.Queue, bus: Bus | None) -> None:
 
 
 async def _calibrate(address: str, samples: list[Sample], path: Path, stop: asyncio.Event) -> None:
-    print(f"wave  calibrate {address}  hold still for {CAL_HOLD_S:.0f}s", flush=True)
-    deadline = time.monotonic() + 12.0
+    print(f"wave  calibrate {address}  hold still for {CAL_HOLD_S:.0f}s once packets flow", flush=True)
+    deadline = time.monotonic() + CAL_WAIT_S
+    told = False
     while time.monotonic() < deadline and not stop.is_set():
         await asyncio.sleep(0.2)
         if len(samples) < 10:
+            if not told and time.monotonic() > deadline - CAL_WAIT_S + 5:
+                print(f"wave  calibrate {address}  still waiting for the first IMU packets", flush=True)
+                told = True
             continue
         end = samples[-1].t
         window = [sample for sample in samples if sample.t >= end - CAL_HOLD_S]
@@ -586,6 +746,32 @@ async def _calibrate(address: str, samples: list[Sample], path: Path, stop: asyn
     stop.set()
 
 
+def raw_test(address: str) -> None:
+    """Run ``run_asyncio_bluetooth`` and ``ButtonAndDataPrint`` with no extra logic."""
+    if not address:
+        raise SystemExit("--raw-test needs --addr. On macOS that is the CoreBluetooth UUID from --discover.")
+    try:
+        from genki_wave.asyncio_runner import run_asyncio_bluetooth
+        from genki_wave.callbacks import ButtonAndDataPrint
+    except ImportError as exc:
+        raise SystemExit(
+            "genki-wave is not installed. In this venv: python3 -m pip install genki-wave"
+        ) from exc
+    print("wave  --raw-test runs genki_wave.asyncio_runner.run_asyncio_bluetooth", flush=True)
+    print("wave  callback is ButtonAndDataPrint, the official example", flush=True)
+    print(
+        "wave  that example starts its 10s consumer in parallel with BleakClient. "
+        "On macOS the connect often takes longer than 10s, so you may see "
+        "'Failed to receive valid package in 10 seconds' and then "
+        "'Connected to Wave' / 'Recieved a cancel signal'.",
+        flush=True,
+    )
+    print("wave  the live path waits until DeviceMode.API is written, then uses --packet-timeout.", flush=True)
+    print("wave  turn the ring on with the middle button. Softwave must be closed.", flush=True)
+    print("wave  Ctrl-C stops. If the ring sticks, hold the top button a few seconds.", flush=True)
+    run_asyncio_bluetooth([ButtonAndDataPrint(print_data_every_n_seconds=1)], address)
+
+
 async def _run(args) -> None:
     api = _import_wave()
     waves = _waves(args)
@@ -599,14 +785,14 @@ async def _run(args) -> None:
     queue: asyncio.Queue = asyncio.Queue()
     buckets: dict[str, list[Sample]] = {address: [] for address, _hand in waves} if args.calibrate else {}
     tasks = []
-    comms = []
+    stop = asyncio.Event()
     for address, hand in waves:
-        producer, consume, comm = await _connect_one(
-            api, address, hand, args, queue, buckets.get(address)
+        tasks.append(
+            asyncio.create_task(
+                _stream_forever(api, address, hand, args, queue, buckets.get(address), stop),
+                name=f"wave-stream-{hand or 'one'}",
+            )
         )
-        comms.append(comm)
-        tasks.append(asyncio.create_task(producer, name=f"wave-in-{hand or 'one'}"))
-        tasks.append(asyncio.create_task(consume, name=f"wave-read-{hand or 'one'}"))
 
     bus = None
     if not args.calibrate:
@@ -614,7 +800,6 @@ async def _run(args) -> None:
         tasks.append(asyncio.create_task(bus.run(), name="wave-bus"))
         tasks.append(asyncio.create_task(_pump(queue, bus), name="wave-pump"))
 
-    stop = asyncio.Event()
     if args.calibrate:
         for address, _hand in waves:
             tasks.append(
@@ -623,15 +808,18 @@ async def _run(args) -> None:
                     name=f"wave-cal-{address}",
                 )
             )
-    print("wave  input only. Ctrl-C stops. If the ring sticks, hold the top button a few seconds.", flush=True)
+    print(
+        "wave  input only. The package timer starts after DeviceMode.API, not during connect. "
+        "Ctrl-C stops. If the ring sticks, hold the top button a few seconds.",
+        flush=True,
+    )
     try:
         if args.calibrate:
             await stop.wait()
         else:
             await asyncio.Event().wait()
     finally:
-        for comm in comms:
-            comm.cancel = True
+        stop.set()
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -646,7 +834,25 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--left-addr", default="", help="left-hand Wave. With --right-addr, a flick carries that side")
     parser.add_argument("--right-addr", default="", help="right-hand Wave")
     parser.add_argument("--print", dest="print_", action="store_true", help="print live yaw, rate, and gyro")
+    parser.add_argument(
+        "--raw-test",
+        action="store_true",
+        help="run run_asyncio_bluetooth with ButtonAndDataPrint and exit",
+    )
     parser.add_argument("--calibrate", action="store_true", help="record a still pose and gyro bias, then exit")
+    parser.add_argument(
+        "--connect-timeout",
+        type=float,
+        default=CONNECT_TIMEOUT_S,
+        help="seconds BleakClient may spend connecting",
+    )
+    parser.add_argument(
+        "--packet-timeout",
+        type=float,
+        default=PACKET_TIMEOUT_S,
+        help="seconds to wait for a package after DeviceMode.API is written",
+    )
+    parser.add_argument("--reconnect-s", type=float, default=RECONNECT_S, help="pause before connecting again")
     parser.add_argument("--cal", default=str(DEFAULT_CAL), help="calibration JSON path")
     parser.add_argument("--invert", action="store_true", help="swap left and right if the yaw sign is mirrored")
     parser.add_argument("--turn-deg", type=float, default=TURN_DEG, help="heading change that counts as a turn")
@@ -670,6 +876,15 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit("thresholds must be positive")
     if args.flick_max_s >= args.turn_min_s:
         raise SystemExit("--flick-max-s must stay under --turn-min-s so a flick is not a turn")
+    if args.connect_timeout <= 0 or args.packet_timeout <= 0 or args.reconnect_s < 0:
+        raise SystemExit("timeouts must be positive")
+    if args.raw_test:
+        try:
+            raw_test(args.addr)
+        except KeyboardInterrupt:
+            print("\nstopped", flush=True)
+            print("wave  if the ring stays connected, hold the top button a few seconds to reset", flush=True)
+        return
     try:
         asyncio.run(_run(args))
     except KeyboardInterrupt:

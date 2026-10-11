@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import math
 import sys
@@ -127,7 +128,77 @@ def check_gestures(wave) -> None:
             )
         )
     assert kinds(mid) == ["turn"], mid
-    print("ok  sustained turn, flick dismiss, drift recenter")
+
+    # Euler yaw stuck at 0. The ring still reports a world-yaw gyro, which is what we integrate.
+    stuck = wave.GestureTracker()
+    stuck.update(wave.Sample(0.0, 0.0, (0.0, 0.0, 0.0)))
+    gyro_turn = []
+    for index in range(1, 71):
+        gyro_turn.extend(
+            stuck.update(wave.Sample(index * 0.02, 0.0, (0.0, 0.0, 40.0), grav=(0.0, 0.0, 1.0)))
+        )
+    assert kinds(gyro_turn) == ["turn"] and gyro_turn[0]["turn"] == "right", gyro_turn
+    assert abs(stuck.heading) > 40.0
+    line = stuck.preview()
+    assert "int" in line and "turn" in line
+    assert "+0.0" not in line.split("int", 1)[1][:12]
+
+    # Pose quaternion maps body X onto world up. Gravity is empty, so the axis has to come from the pose.
+    half = math.sqrt(0.5)
+    tilted = wave.GestureTracker()
+    tilted.update(wave.Sample(0.0, 0.0, (0.0, 0.0, 0.0), grav=(0.0, 0.0, 0.0), quat=(1.0, 0.0, 0.0, 0.0)))
+    pose_turn = []
+    for index in range(1, 71):
+        pose_turn.extend(
+            tilted.update(
+                wave.Sample(
+                    index * 0.02,
+                    0.0,
+                    (40.0, 0.0, 0.0),
+                    grav=(0.0, 0.0, 0.0),
+                    quat=(half, 0.0, -half, 0.0),
+                )
+            )
+        )
+    assert kinds(pose_turn) == ["turn"], pose_turn
+
+    # A pause in the middle of a turn must not snap the integral back to zero.
+    paused = wave.GestureTracker()
+    paused.update(wave.Sample(0.0, 0.0, (0.0, 0.0, 0.0)))
+    feed(paused, wave, 0.0, 22.0, 0.05, 0.55)
+    held = feed(paused, wave, 22.0, 22.0, 0.55, 1.8, gyro=(0.0, 0.0, 0.0))
+    assert held == []
+    assert abs(paused.heading) > 12.0, paused.heading
+    rest = feed(paused, wave, 22.0, 55.0, 1.85, 2.6)
+    assert kinds(rest) == ["turn"], rest
+
+    biased = wave.GestureTracker(gyro_bias=(0.0, 0.0, 10.0))
+    biased.update(wave.Sample(0.0, 0.0, (0.0, 0.0, 10.0)))
+    assert feed(biased, wave, 0.0, 0.0, 0.05, 2.5, gyro=(0.0, 0.0, 10.0)) == []
+    assert abs(biased.heading) < 8.0
+    real = feed(biased, wave, 0.0, 0.0, 2.6, 4.0, gyro=(0.0, 0.0, 50.0))
+    assert kinds(real) == ["turn"], real
+
+    assert wave.TURN_DEG == 45.0 and wave.TURN_MIN_S == 0.7
+
+    class _Vec:
+        def __init__(self, x, y, z):
+            self.x, self.y, self.z = x, y, z
+
+    class _Quat:
+        def __init__(self, w, x, y, z):
+            self.w, self.x, self.y, self.z = w, x, y, z
+
+    class _Pack:
+        gyro = _Vec(30.0, 0.0, 0.0)
+        grav = _Vec(0.0, 0.0, 0.0)
+        current_pose = _Quat(half, 0.0, -half, 0.0)
+        timestamp_us = 1_000_000
+
+    packed = wave.sample_from_package(_Pack(), 0.0)
+    assert packed is not None and packed.quat[0] == half
+    assert abs(wave.world_yaw_dps(packed) - 30.0) < 1e-6
+    print("ok  sustained turn, flick dismiss, gyro heading")
 
 
 def check_buttons_and_cal(wave) -> None:
@@ -159,20 +230,95 @@ def check_buttons_and_cal(wave) -> None:
     parser = wave.build_parser()
     help_text = parser.format_help()
     assert "--print" in help_text and "--calibrate" in help_text and "--discover" in help_text
+    assert "--raw-test" in help_text and "--packet-timeout" in help_text
     try:
         wave.main(["--turn-min-s", "0.2", "--flick-max-s", "0.3", "--addr", "00"])
     except SystemExit as exc:
         assert "flick" in str(exc)
     else:
         raise AssertionError("overlapping flick and turn windows should be rejected")
+    try:
+        wave.main(["--raw-test"])
+    except SystemExit as exc:
+        assert "raw-test" in str(exc)
+    else:
+        raise AssertionError("--raw-test without an address should exit")
     assert "genki_wave" not in sys.modules
     print("ok  buttons, calibration, and tuning flags")
+
+
+async def check_arm_before_timeout(wave) -> None:
+    """A slow connect must finish the API writes before the receive timer can fire."""
+    logs: list[str] = []
+    queue: asyncio.Queue = asyncio.Queue()
+
+    class Slow:
+        async def start_notify(self, _uuid, _cb):
+            logs.append("inside-notify")
+            await asyncio.sleep(0.2)
+            await queue.put("pkt")
+
+        async def write_gatt_char(self, _uuid, _data, _response=False):
+            logs.append("write")
+
+    got: list[str] = []
+
+    def on_package(package) -> bool:
+        got.append(package)
+        logs.append("delivered")
+        return True
+
+    result = await wave.arm_and_read(
+        Slow(),
+        "char",
+        None,
+        [("device-info request", b"a"), ("DeviceMode.API", b"b"), ("MOTION_DATA config", b"c")],
+        queue,
+        on_package,
+        0.05,
+        logs.append,
+        asyncio.Event(),
+    )
+    assert result == "package", result
+    assert got == ["pkt"]
+    assert logs.index("inside-notify") < logs.index("sent DeviceMode.API")
+    assert logs.index("sent MOTION_DATA config") < logs.index("delivered")
+    assert "timeout" not in logs
+
+    empty: asyncio.Queue = asyncio.Queue()
+    quiet: list[str] = []
+
+    class SlowQuiet:
+        async def start_notify(self, _uuid, _cb):
+            quiet.append("inside-notify")
+            await asyncio.sleep(0.2)
+
+        async def write_gatt_char(self, _uuid, _data, _response=False):
+            quiet.append("write")
+
+    result = await wave.arm_and_read(
+        SlowQuiet(),
+        "char",
+        None,
+        [("device-info request", b"a"), ("DeviceMode.API", b"b"), ("MOTION_DATA config", b"c")],
+        empty,
+        lambda _package: False,
+        0.05,
+        quiet.append,
+        asyncio.Event(),
+    )
+    assert result == "timeout"
+    assert quiet.count("write") == 3
+    assert quiet.index("sent DeviceMode.API") < quiet.index("timeout")
+    assert quiet.index("inside-notify") < quiet.index("timeout")
+    print("ok  package timer starts after DeviceMode.API")
 
 
 def main() -> None:
     wave = load_wave()
     check_gestures(wave)
     check_buttons_and_cal(wave)
+    asyncio.run(check_arm_before_timeout(wave))
     print("ok  wave input")
 
 
