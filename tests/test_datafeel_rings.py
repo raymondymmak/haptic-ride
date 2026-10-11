@@ -243,6 +243,28 @@ async def check_behind_sync(rings) -> None:
     print("ok  car_behind pulses both wrists on the same beat")
 
 
+async def check_dismiss_stops_cars(rings) -> None:
+    events: list = []
+    player = rings.Player({"left": Rec("left", events), "right": Rec("right", events)})
+    await player.play("right", "car_approach", 0.8)
+    await player.play("left", "turn_soon", 0.4)
+    await asyncio.sleep(0.05)
+    await player.stop_cars()
+    assert player._pattern["right"] == ""
+    assert player._pattern["left"] == "turn_soon"
+    idles = [event for event in events if event[1] == "idle"]
+    assert idles == [("right", "idle")], idles
+    await player.wait()
+
+    events.clear()
+    await player.play("both", "car_behind", 0.8)
+    await asyncio.sleep(0.05)
+    await player.stop_cars()
+    assert player._pattern["left"] == "" and player._pattern["right"] == ""
+    assert any(event[1] == "idle" for event in events)
+    print("ok  dismiss stops car buzz and leaves the turn cue")
+
+
 class Proc:
     def __init__(self, args: list[str]):
         self.lines: list[str] = []
@@ -423,6 +445,7 @@ def main() -> None:
     asyncio.run(check_override(rings))
     asyncio.run(check_turn_cues(rings))
     asyncio.run(check_behind_sync(rings))
+    asyncio.run(check_dismiss_stops_cars(rings))
     check_test_flag(rings)
     check_bridge()
     print("ok  datafeel rings")

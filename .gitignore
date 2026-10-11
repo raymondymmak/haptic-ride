@@ -4,5 +4,6 @@ __pycache__/
 *.pyc
 logs/*.jsonl
 logs/radar_background.json
+logs/wave_cal.json
 *.log
 .DS_Store

@@ -36,7 +36,9 @@ turn_soon and turn_now share one amber. Soon holds that color as a steady
 glow for about 1.2 s with one pulse. Now blinks it about five times at 6 Hz
 with a pulse on each blink. car_approach is red, blue_shell pulsing blue.
 car_behind pulses both dots together with a dim red LED. combo is a triple
-tap with no LED. The LED goes off when the pattern ends.
+tap with no LED. The LED goes off when the pattern ends. A dismiss message
+from the Wave cuts car_approach, car_behind, and blue_shell immediately.
+Turn cues keep playing.
 BLE is the C# stack and is not used here.
 """
 
@@ -57,6 +59,7 @@ CP210X_PID = 0xEA60
 
 PATTERNS = ("turn_soon", "turn_now", "car_approach", "car_behind", "blue_shell", "combo")
 SIDES = ("left", "right", "both")
+CAR_PATTERNS = {"car_approach", "car_behind", "blue_shell"}
 
 # The engine resends a held cue about every 0.45 s. Continuous feels hold
 # a little longer than that so a refresh restarts the task before idle.
@@ -1029,6 +1032,38 @@ class Player:
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
 
+    async def stop_cars(self) -> None:
+        """Cut a car warning now. Turn cues and the combo tap keep playing."""
+        async with self._locks["left"]:
+            async with self._locks["right"]:
+                sides = [side for side in ("left", "right") if self._pattern.get(side) in CAR_PATTERNS]
+                if not sides:
+                    return
+                tasks = []
+                seen: set[int] = set()
+                for side in sides:
+                    self._gen[side] += 1
+                    self._pattern[side] = ""
+                    task = self._tasks.get(side)
+                    if task is not None and not task.done() and id(task) not in seen:
+                        seen.add(id(task))
+                        task.cancel()
+                        tasks.append(task)
+                    self._tasks[side] = None
+                if self._sync_task is not None and id(self._sync_task) in seen:
+                    self._sync_task = None
+                if tasks:
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                for side in sides:
+                    chain = self.outputs.get(side)
+                    if chain is None or not chain.available():
+                        continue
+                    try:
+                        await chain.idle()
+                    except Exception as exc:
+                        print(f"rings  {side} idle failed: {exc}", flush=True)
+                print("rings  dismiss  car buzz off", flush=True)
+
     async def shutdown(self) -> None:
         tasks = [task for task in self._tasks.values() if task is not None and not task.done()]
         for task in tasks:
@@ -1071,6 +1106,10 @@ async def run_socket(url: str, player: Player) -> None:
                     try:
                         msg = json.loads(raw)
                     except json.JSONDecodeError:
+                        continue
+                    if isinstance(msg, dict) and msg.get("type") == "dismiss":
+                        print("rings  dismiss", flush=True)
+                        await player.stop_cars()
                         continue
                     parsed = parse_buzz(msg)
                     if parsed is None:

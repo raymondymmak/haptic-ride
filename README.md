@@ -62,7 +62,8 @@ The bridge is a dumb hub. It rebroadcasts every JSON message and prints buzz com
 
 ```text
 car, nav                  bridge  →  game, overlay, ring client
-shoulder_check, turn      overlay →  game          (later: ring IMU)
+shoulder_check, turn      overlay or Wave → game
+dismiss                   Wave → game, ring client
 buzz                      game    →  bridge, overlay, ring client
 state                     game    →  overlay
 hello                     bridge  →  whoever just connected
@@ -81,11 +82,15 @@ One JSON object per WebSocket text frame. Fields the engine adds (`id`, and the 
 {"type": "nav", "turn": "right", "in_m": 18.0, "id": "n0-1"}
 {"type": "shoulder_check", "side": "left"}
 {"type": "look_back"}
-{"type": "turn", "turn": "right"}
+{"type": "turn", "turn": "right", "side": "right"}
+{"type": "dismiss"}
+{"type": "dismiss", "side": "left"}
 {"type": "mode", "value": "sim"}
 ```
 
 `speed` is closing speed in m/s, positive when the car is approaching. `dist` and `in_m` are meters. `id` lets two cars exist at once; without it the engine treats the side as the id. `side` on a car is `left`, `right`, or `behind` (`center` is accepted as `behind`). A shoulder check on either side scores a behind car. `look_back` scores only that car.
+
+`turn` takes `turn` or `side` (`left` or `right`). The overlay sends `turn`. The Wave sends both. `dismiss` is a wrist flick: it scores like a shoulder check and silences that car warning so the buzz stops. With `side`, it answers that wrist and a car behind. Without `side`, it answers every car that is currently warning and scores the nearest (a blue shell first).
 
 `mode` asks the bridge to change car source. `value` is `sim` or `real`. The bridge answers with the same message, to every client, using the value it actually applied. `hello` also carries `source` (`sim` or `real`) plus `mode` (`fake`, `real`, or `synthetic`), which is which process you joined.
 
@@ -140,6 +145,7 @@ Pay multiplier is `1 + 0.5 × combo`. The points land, then combo increases by o
 | Item box — shoulder check on a side that currently has a car inside 25 m, or a look-back (`S` / `W`) on a car directly behind. A left or right check also scores the behind car | 100 × pay |
 | Blue shell dodge — that car is closing at ≥ 8 m/s | 250 × pay |
 | Drift boost — turn input matches the cue while it is NOW | 150 × pay |
+| Dismiss — Wave flick, middle-button click, or `{"type":"dismiss"}`. Same pay as the matching check, and the car buzz stops | 100 × pay, or 250 × pay for a blue shell |
 
 Wrong-way during NOW drops the combo. Turning before NOW does not. The constants sit at the top of `engine/game.py`.
 
@@ -359,6 +365,37 @@ With the radar on the Windows VM, point the client at the VM (`play_buzz()` ther
 python3 rings/datafeel_rings.py --url ws://VM_IP:8765
 ```
 
+## Genki Wave
+
+The Wave is input only. It does not buzz. `rings/datafeel_rings.py` still plays every cue. The Wave publishes rider gestures on the same bridge websocket.
+
+A turn is a sustained heading change, about 45–90 degrees over 1–3 seconds. The tracker follows Wave euler yaw (radians), smooths it, and uses gyro yaw rate around gravity as a second view in `--print`. While the ring is straight (yaw rate under about 12 °/s for half a second) the heading zero recenters, so slow drift does not become a fake turn. Crossing the turn angle inside the window publishes one cue:
+
+```json
+{"type": "turn", "turn": "left", "side": "left"}
+```
+
+The engine scores that the same way as the overlay arrow keys: it has to match the nav cue during TURN NOW.
+
+A flick is a short sharp spike, distinct from that turn: gyro magnitude over about 180 °/s, or linear acceleration over about 1.6 g, lasting under about 0.35 s. The Wave's own `peak` flag counts too. A flick publishes `{"type":"dismiss"}`. The engine scores the buzzing car like a shoulder check and marks it silenced, so it drops off the wrists and does not become a miss. The ring client cancels `car_approach`, `car_behind`, and `blue_shell` immediately. A turn cue that is already playing stays.
+
+One Wave: the sign of the heading change picks left or right. `--invert` swaps them if a turn comes out mirrored. Two Waves (`--left-addr` and `--right-addr`): each flick includes that hand's `side`, so a left-hand flick prefers the left car (and a car behind). Heading still decides the turn direction.
+
+The middle button click is the same dismiss. The bottom button click is `look_back`. The top button is the hardware reset, not a gesture.
+
+```bash
+python3 -m pip install -r requirements.txt
+python3 rings/wave_input.py --discover
+python3 rings/wave_input.py --addr D5:73:DB:85:B4:A1 --print
+python3 rings/wave_input.py --addr D5:73:DB:85:B4:A1 --calibrate
+python3 rings/wave_input.py --addr D5:73:DB:85:B4:A1 --url ws://127.0.0.1:8765
+python3 rings/wave_input.py --left-addr AA:AA:AA:AA:AA:AA --right-addr BB:BB:BB:BB:BB:BB
+```
+
+`--print` streams `yaw`, `rate`, `gyro`, and `yaw_gyro` so the thresholds can be tuned on the bike. `--calibrate` records about two seconds of stillness (neutral yaw and gyro bias) into `logs/wave_cal.json` and exits. Flags: `--turn-deg` (default 60), `--turn-min-s` (1), `--turn-max-s` (3), `--flick-dps` (180), `--flick-g` (1.6), `--flick-max-s` (0.35), `--straight-dps` (12), `--straight-s` (0.5).
+
+Turn the ring on with the middle button. It must not already be connected to Softwave or to the Mac, because bleak can only open a free device. On Linux, if the adapter grabs it, `bluetoothctl disconnect` first. If you Ctrl-C and the ring sticks in a bad session, hold the top button for a few seconds. macOS Apple Silicon uses the same virtualenv as the rest of the repo. `genki-wave` is on PyPI and talks BLE through bleak.
+
 ## Demo loop
 
 `bridge/fake_bridge.py` repeats this every 56 seconds. Turns and cars are on opposite sides so both rings are readable in a picture-in-picture crop.
@@ -389,10 +426,12 @@ bridge/radar_filter.py       background, threshold, persistence
 bridge/hub.py                WebSocket fan-out
 engine/game.py               haptics + score
 rings/datafeel_rings.py      DataFeel dots, one chain or two El Jefe
+rings/wave_input.py          Genki Wave turns and dismiss flicks
 overlay/index.html           the HUD, one file
 examples/short.jsonl         tiny replay
 run.sh                       venv, bridge, engine
 tests/test_e2e.py            headless end-to-end check
 tests/test_datafeel_rings.py port map, patterns, dry-run against the fake bridge
 tests/test_camera_bridge.py  synthetic boxes, persistence, mode toggle
+tests/test_wave_input.py     heading turns, flick dismiss, calibration
 ```

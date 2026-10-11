@@ -112,6 +112,41 @@ def check_rules(game_mod) -> None:
     assert mixed.on_check("left") == game_mod.BASE_ITEM
     assert mixed.cars["B"]["scored"] is False
     assert mixed.on_check("right") == int(game_mod.BASE_ITEM * 1.5)
+
+    waved = game_mod.Game()
+    waved.now = 1
+    waved.on_nav({"type": "nav", "turn": "left", "in_m": 8, "id": "w"})
+    assert game_mod.handle(waved, {"type": "turn", "side": "left"}) == game_mod.BASE_DRIFT
+
+    dismissed = game_mod.Game()
+    dismissed.now = 1
+    dismissed.on_nav({"type": "nav", "turn": "left", "in_m": 20, "id": "n"})
+    dismissed.on_car({"type": "car", "side": "left", "dist": 8, "speed": 3, "id": "L"})
+    dismissed.on_car({"type": "car", "side": "right", "dist": 14, "speed": 9, "id": "R"})
+    assert dismissed.rings()["left"]["pattern"] == "car_approach"
+    assert game_mod.handle(dismissed, {"type": "dismiss", "side": "right"}) == game_mod.BASE_DODGE
+    assert dismissed.rings()["right"] is None
+    assert dismissed.rings()["left"]["pattern"] == "car_approach"
+    assert dismissed.cars["R"]["silenced"] is True
+    assert dismissed.cars["L"]["scored"] is False
+
+    both = game_mod.Game()
+    both.now = 1
+    both.on_car({"type": "car", "side": "left", "dist": 9, "speed": 3, "id": "L"})
+    both.on_car({"type": "car", "side": "right", "dist": 16, "speed": 3, "id": "R"})
+    assert game_mod.handle(both, {"type": "dismiss"}) == game_mod.BASE_ITEM
+    assert both.rings() == {"left": None, "right": None}
+    both.on_car({"type": "car", "side": "left", "dist": 6, "speed": 3, "id": "L"})
+    assert both.cars["L"]["silenced"] is True
+    assert both.rings()["left"] is None
+    both.now = 1 + game_mod.CAR_GONE_S + 0.2
+    both.sweep()
+    assert both.misses == 0
+
+    empty = game_mod.Game()
+    empty.now = 1
+    assert game_mod.handle(empty, {"type": "dismiss"}) is None
+    assert empty.flash["text"] == "NO CAR"
     print("ok  scoring rules")
 
 

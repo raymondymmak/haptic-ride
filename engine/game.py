@@ -120,6 +120,7 @@ class Game:
             "blue": speed >= BLUE_MPS,
             "warned": bool(prev and prev["warned"]) or dist <= ALERT_M,
             "scored": bool(prev and prev["scored"]),
+            "silenced": bool(prev and prev.get("silenced")),
             "seen": self.now,
         }
 
@@ -192,6 +193,44 @@ class Game:
         self.drifts += 1
         return self.award(BASE_DRIFT, "drift", "DRIFT BOOST")
 
+    def on_dismiss(self, side: str | None = None) -> int | None:
+        """A wrist flick acknowledges the car that is buzzing.
+
+        It scores like a shoulder check, then drops that warning so the
+        rings stop. A side limits the flick to that wrist (and a car
+        behind). With no side, the nearest live warning is the one that pays
+        and every current warning goes quiet.
+        """
+        if side == "center":
+            side = "behind"
+        live = [
+            car
+            for car in self.cars.values()
+            if not car["scored"] and not car.get("silenced") and car["dist"] <= ALERT_M
+        ]
+        if not live:
+            self.set_flash("NO CAR", 0, "whiff")
+            return None
+        if side in ("left", "right"):
+            wanted = (side, "behind")
+            picked = [car for car in live if car["side"] in wanted]
+            targets = picked or live
+        elif side == "behind":
+            picked = [car for car in live if car["side"] == "behind"]
+            targets = picked or live
+        else:
+            targets = live
+        targets.sort(key=lambda car: (not car["blue"], car["dist"]))
+        chosen = targets[0]
+        for car in targets:
+            car["silenced"] = True
+            car["scored"] = True
+        if chosen["blue"]:
+            self.dodges += 1
+            return self.award(BASE_DODGE, "dodge", "BLUE SHELL DODGED")
+        self.items += 1
+        return self.award(BASE_ITEM, "item", "ITEM BOX")
+
     def sweep(self) -> None:
         stale = [cid for cid, car in self.cars.items() if self.now - car["seen"] > CAR_GONE_S]
         for cid in stale:
@@ -209,7 +248,7 @@ class Game:
         out: dict[str, dict | None] = {"left": None, "right": None}
         nearest: dict[str, dict] = {}
         for car in self.cars.values():
-            if car["dist"] > ALERT_M or car["side"] not in ("left", "right", "behind"):
+            if car.get("silenced") or car["dist"] > ALERT_M or car["side"] not in ("left", "right", "behind"):
                 continue
             current = nearest.get(car["side"])
             if current is None or car["dist"] < current["dist"]:
@@ -333,8 +372,13 @@ def handle(game: Game, msg: dict) -> int | None:
         return game.on_check(msg.get("side"))
     elif kind == "look_back":
         return game.on_check("behind")
+    elif kind == "dismiss":
+        return game.on_dismiss(msg.get("side"))
     elif kind == "turn":
-        return game.on_turn(msg.get("turn"))
+        turn = msg.get("turn")
+        if turn not in ("left", "right"):
+            turn = msg.get("side")
+        return game.on_turn(turn)
     return None
 
 
