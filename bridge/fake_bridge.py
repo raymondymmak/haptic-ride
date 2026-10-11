@@ -115,11 +115,13 @@ def keep_simulated(value: str) -> str:
     return "sim"
 
 
-async def simulate(hub: Hub, recorder: Recorder | None, tick: float, emit_cars=None) -> None:
-    """Nav cues every tick. Scripted cars too, unless emit_cars() is false.
+async def simulate(hub: Hub, recorder: Recorder | None, tick: float, emit_cars=None, emit_nav=None) -> None:
+    """Scripted cars, and scripted nav unless emit_nav() is false.
 
-    The hardware bridge reuses this so the demo route can replace radar
-    cars without a restart, while the turn cues keep running either way.
+    emit_nav left as None keeps publishing the route (the fake bridge and
+    the radar stub). The camera bridge passes it only for --nav scripted,
+    so a spotter or a phone can own the turn cues. emit_cars False keeps
+    the scripted cars off while a live sensor is publishing.
     """
     t0 = time.monotonic()
     lap_seen = -1
@@ -134,7 +136,7 @@ async def simulate(hub: Hub, recorder: Recorder | None, tick: float, emit_cars=N
             if lap:
                 print(f"loop  {lap}", flush=True)
         nav = nav_at(t, lap)
-        if nav is not None:
+        if nav is not None and (emit_nav is None or emit_nav()):
             if nav["id"] not in announced:
                 announced.add(nav["id"])
                 print(f"nav   {nav['turn']:5}  in {nav['in_m']:.0f} m", flush=True)

@@ -56,7 +56,9 @@ def check_geometry(cam) -> None:
     assert args.camera == 0 and args.port == 8765 and args.http_port == 8641
     assert args.mirror is True and args.persist == 3 and args.center_width == 0.34
     assert args.preview is False
+    assert args.nav == "spotter" and args.https is False
     assert cam.build_parser().parse_args(["--no-mirror"]).mirror is False
+    assert cam.build_parser().parse_args(["--nav", "scripted"]).nav == "scripted"
     print("ok  distance, thirds, and --mirror default")
 
 
@@ -171,6 +173,7 @@ async def check_socket() -> None:
     async with connect(url) as sock:
         hello = json.loads(await asyncio.wait_for(sock.recv(), timeout=3))
         assert hello["type"] == "hello" and hello["source"] == "real" and hello["mode"] == "synthetic"
+        assert hello["nav"] == "scripted"
         while time.monotonic() < deadline and (len(cars) < 4 or not saw_nav):
             msg = json.loads(await asyncio.wait_for(sock.recv(), timeout=4))
             if msg.get("type") == "nav":
@@ -265,13 +268,75 @@ def check_stream() -> None:
     assert b"\xff\xd8" in buf
     page = urllib.request.urlopen("http://127.0.0.1:8664/", timeout=2).read()
     assert b"hide camera" in page and b"REAR VIEW" in page and b"dismiss" in page
+    spotter = urllib.request.urlopen("http://127.0.0.1:8664/spotter", timeout=2).read()
+    assert b"LEFT<br>SOON" in spotter and b"RIGHT<br>NOW" in spotter and b"CLEAR" in spotter
+    assert b'source: "spotter"' in spotter and b'data-m="30"' in spotter and b'data-m="5"' in spotter
+    nav = urllib.request.urlopen("http://127.0.0.1:8664/nav", timeout=2).read()
+    assert b"watchPosition" in nav and b"leaflet" in nav.lower() and b"accuracy" in nav
+    assert b"openstreetmap" in nav.lower()
     print("ok  /camera.mjpg and the rear-view page")
+
+
+def check_nav_gate() -> None:
+    import contextlib
+
+    import fake_bridge
+
+    class Sink:
+        def __init__(self):
+            self.msgs = []
+
+        async def broadcast(self, msg):
+            self.msgs.append(msg)
+
+    async def run():
+        quiet = Sink()
+        task = asyncio.create_task(
+            fake_bridge.simulate(quiet, None, 0.05, emit_cars=lambda: False, emit_nav=lambda: False)
+        )
+        await asyncio.sleep(0.35)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        assert quiet.msgs == []
+
+        live = Sink()
+        task = asyncio.create_task(
+            fake_bridge.simulate(live, None, 0.05, emit_cars=lambda: False, emit_nav=lambda: True)
+        )
+        await asyncio.sleep(0.35)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        assert any(msg.get("type") == "nav" and msg.get("source") == "scripted" for msg in live.msgs)
+        assert all(msg.get("type") == "nav" for msg in live.msgs)
+
+    asyncio.run(run())
+    print("ok  --nav gates the scripted route")
+
+
+def check_cert(cam) -> None:
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as folder:
+        cert = Path(folder) / "cert.pem"
+        key = Path(folder) / "key.pem"
+        cam.ensure_dev_cert(cert, key, ["127.0.0.1", "localhost"])
+        text = cert.read_bytes()
+        secret = key.read_bytes()
+        assert b"BEGIN CERTIFICATE" in text
+        assert b"PRIVATE KEY" in secret
+        ctx = cam.server_tls(cert, key)
+        assert ctx is not None
+    print("ok  self-signed cert")
 
 
 def main() -> None:
     cam = load_camera()
     check_geometry(cam)
     check_tracks(cam)
+    check_nav_gate()
+    check_cert(cam)
     check_stream()
     proc = Proc([
         sys.executable,
@@ -280,6 +345,7 @@ def main() -> None:
         "--port", "8783",
         "--http-port", "8663",
         "--synthetic",
+        "--nav", "scripted",
         "--fps", "30",
     ])
     try:

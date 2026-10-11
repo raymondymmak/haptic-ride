@@ -131,6 +131,9 @@ class Game:
         }
 
     def on_nav(self, msg: dict) -> None:
+        if msg.get("clear") is True:
+            self.nav = None
+            return
         try:
             turn = msg["turn"]
             in_m = float(msg["in_m"])

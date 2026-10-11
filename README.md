@@ -31,6 +31,13 @@ http://<laptop-ip>:8641/?ring=left
 http://<laptop-ip>:8641/?ring=right
 ```
 
+On the camera bridge, a phone on the same Wi-Fi calls the turns. The bridge prints the Mac's LAN address at startup. Default `--nav spotter`:
+
+```text
+http://<mac-lan-ip>:8641/spotter
+http://<mac-lan-ip>:8641/nav
+```
+
 `./run.sh` prints the LAN address. `WS_PORT` and `HTTP_PORT` change the ports (defaults `8765` and `8641`). It makes a virtualenv when Python allows it, and otherwise installs the dependency into `.vendor/`.
 
 Without the script, from the repo root:
@@ -223,7 +230,7 @@ IF gain 33–45 is the range that worked. Raising max range, resolution, speed, 
 
 ## Camera bridge (Mac)
 
-Indoors the radar invents targets that jump between about 1 m, 5 m, and 7 m. `bridge/camera_bridge.py` is the fallback. It runs on the demo Mac (Apple Silicon, Python 3.13), opens a webcam or Continuity Camera, and publishes the same `car` events on the same ports (`8765` / `8641`). The engine, the overlay, and the ring client stay as they are. **Real** is the camera. **Simulated** swaps in the scripted cars from `fake_bridge.py`. Turn cues keep running in both.
+Indoors the radar invents targets that jump between about 1 m, 5 m, and 7 m. `bridge/camera_bridge.py` is the fallback. It runs on the demo Mac (Apple Silicon, Python 3.13), opens a webcam or Continuity Camera, and publishes the same `car` events on the same ports (`8765` / `8641`). The engine, the overlay, and the ring client stay as they are. **Real** is the camera. **Simulated** swaps in the scripted cars from `fake_bridge.py`. Turn cues follow `--nav` (default `spotter`), so the scripted route does not also call turns unless you pass `--nav scripted`.
 
 Stop `./run.sh` first. It uses ports 8765 and 8641.
 
@@ -258,6 +265,54 @@ python3 rings/datafeel_rings.py --url ws://127.0.0.1:8765
 ```
 
 Open [http://127.0.0.1:8641](http://127.0.0.1:8641). Phones use `http://<mac-ip>:8641`.
+
+## Phone turn cues
+
+`--nav` chooses who publishes `{type:"nav", turn, in_m}`. The engine still scores a Wave turn during TURN NOW (inside 12 m).
+
+| `--nav` | What calls the turn |
+| --- | --- |
+| `spotter` (default) | A teammate's phone at `/spotter`. The scripted route does not emit nav |
+| `phone` | The rider's phone at `/nav`. The scripted route does not emit nav |
+| `scripted` | The one-minute demo route, same as `./run.sh` |
+| `off` | Nobody. Cars still publish |
+
+The overlay pill reads **NAV · SPOTTER**, **NAV · PHONE GPS**, or **NAV · SCRIPTED**. Phone GPS adds the accuracy, for example `±8 m`.
+
+Spotter is the indoor demo. Same Wi-Fi, plain HTTP, no account. The bridge prints the address:
+
+```text
+http://<mac-lan-ip>:8641/spotter
+```
+
+The buttons are LEFT SOON, RIGHT SOON, LEFT NOW, RIGHT NOW, and CLEAR. SOON sends `in_m: 30` (the rings buzz turn-soon). NOW sends `in_m: 5` (turn-now, which is what a matching Wave turn scores). CLEAR sends `{type:"nav", clear:true}` and drops the cue without a miss. SOON then NOW on the same side is one cue that gets closer, so it is not a second turn.
+
+Phone GPS is the outdoor page:
+
+```text
+http://<mac-lan-ip>:8641/nav
+```
+
+It is a Leaflet map on OpenStreetMap. Pan the crosshair, tap DROP LEFT or DROP RIGHT, then START GPS. `watchPosition` tracks the rider. Inside 40 m the page sends the live distance (SOON). Inside 12 m it sends NOW. The accuracy readout is the browser's `coords.accuracy`. The route stays in the phone's local storage.
+
+iPhone Safari only shares location on a secure page, so `http://` works for the spotter and not for GPS. Two ways:
+
+```bash
+python3 bridge/camera_bridge.py --https
+```
+
+That serves both the pages and the websocket with a self-signed cert (`logs/dev-cert.pem`, generated with openssl, or pass `--https-cert` and `--https-key`). Open `https://<mac-lan-ip>:8641/nav` and accept the certificate warning. The page then uses `wss://` on port 8765. If the phone still refuses location on an untrusted cert, tunnel each port and open the page with the matching websocket:
+
+```bash
+cloudflared tunnel --url http://127.0.0.1:8641
+cloudflared tunnel --url http://127.0.0.1:8765
+```
+
+```text
+https://<pages-tunnel>/nav?url=wss://<websocket-tunnel>
+```
+
+`ngrok http` is the same idea: one tunnel for 8641, one for 8765, and `?url=` points at the websocket tunnel. The phone needs a network path to the OpenStreetMap tiles and the Leaflet CDN.
 
 ```bash
 python3 bridge/camera_bridge.py --camera 1 --preview

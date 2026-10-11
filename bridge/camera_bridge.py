@@ -4,9 +4,9 @@
 A backward-facing webcam or Continuity Camera feeds a small YOLO model.
 The nearest closing object on each side becomes the same car event the
 radar publishes, and this process hosts the same hub (websocket 8765,
-overlay 8641). Nav cues and the Simulated / Real toggle behave like
-bridge/real_bridge_stub.py: Real is the camera, Simulated is the scripted
-route, and turn cues run in both.
+overlay 8641). Real is the camera. Simulated swaps in the scripted
+cars. Turn cues come from --nav (default spotter): the phone page at
+/spotter, phone GPS at /nav, the scripted route, or nobody.
 
     python3 bridge/camera_bridge.py --camera 0
     python3 bridge/camera_bridge.py --list-cameras
@@ -24,6 +24,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import signal
+import ssl
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -714,17 +716,95 @@ async def play_buzz(cmd: dict) -> None:
     print(f"rings  client plays  {side:5}  {pattern:13}  {intensity:.2f}", flush=True)
 
 
-def banner(args) -> None:
+def _san(host: str) -> str:
+    parts = host.split(".")
+    if len(parts) == 4 and all(part.isdigit() and 0 <= int(part) <= 255 for part in parts):
+        return "IP:" + host
+    return "DNS:" + host
+
+
+def ensure_dev_cert(cert: Path, key: Path, hosts: list[str]) -> None:
+    """Write a self-signed cert if the files are not already there."""
+    if cert.is_file() and key.is_file():
+        return
+    cert.parent.mkdir(parents=True, exist_ok=True)
+    cfg = cert.with_suffix(".cnf")
+    cfg.write_text(
+        "[req]\n"
+        "distinguished_name = dn\n"
+        "x509_extensions = ext\n"
+        "prompt = no\n"
+        "[dn]\n"
+        "CN = haptic-ride\n"
+        "[ext]\n"
+        "subjectAltName = " + ",".join(_san(host) for host in hosts) + "\n"
+        "keyUsage = digitalSignature, keyEncipherment\n"
+        "extendedKeyUsage = serverAuth\n",
+        encoding="utf-8",
+    )
+    try:
+        subprocess.run(
+            [
+                "openssl", "req", "-x509", "-newkey", "rsa:2048",
+                "-keyout", str(key), "-out", str(cert),
+                "-days", "365", "-nodes", "-config", str(cfg),
+            ],
+            check=True,
+            capture_output=True,
+        )
+    except FileNotFoundError as exc:
+        raise SystemExit("openssl is required for --https") from exc
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or b"").decode("utf-8", "replace").strip()
+        raise SystemExit(f"could not create a certificate: {detail}") from exc
+    finally:
+        cfg.unlink(missing_ok=True)
+
+
+def server_tls(cert: Path, key: Path) -> ssl.SSLContext:
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(str(cert), str(key))
+    return ctx
+
+
+def resolve_tls(args) -> tuple[ssl.SSLContext, ssl.SSLContext] | None:
+    if not args.https:
+        return None
+    if args.https_cert or args.https_key:
+        if not args.https_cert or not args.https_key:
+            raise SystemExit("--https-cert and --https-key are used together")
+        cert, key = Path(args.https_cert), Path(args.https_key)
+    else:
+        folder = BRIDGE_DIR.parent / "logs"
+        cert = folder / "dev-cert.pem"
+        key = folder / "dev-key.pem"
+        ensure_dev_cert(cert, key, ["localhost", lan_ip(), "127.0.0.1"])
+    return server_tls(cert, key), server_tls(cert, key)
+
+
+def banner(args, secure: bool) -> None:
     ip = lan_ip()
+    http = "https" if secure else "http"
+    ws = "wss" if secure else "ws"
     mode = "synthetic boxes" if args.synthetic else f"camera {args.camera}"
     mirror = "on" if args.mirror else "off"
+    route = {
+        "scripted": "scripted route is publishing turn cues",
+        "spotter": "scripted route is off — open /spotter on a phone",
+        "phone": "scripted route is off — open /nav on the rider's phone",
+        "off": "no turn cues from this bridge",
+    }[args.nav]
     print("", flush=True)
     print(f"  haptic-ride  camera bridge  ({mode})", flush=True)
-    print(f"  overlay     http://127.0.0.1:{args.http_port}", flush=True)
-    print(f"  rear view   http://127.0.0.1:{args.http_port}/camera.mjpg", flush=True)
-    print(f"  websocket   ws://{ip}:{args.port}", flush=True)
+    print(f"  overlay     {http}://127.0.0.1:{args.http_port}", flush=True)
+    print(f"  spotter     {http}://{ip}:{args.http_port}/spotter", flush=True)
+    print(f"  phone gps   {http}://{ip}:{args.http_port}/nav", flush=True)
+    print(f"  rear view   {http}://127.0.0.1:{args.http_port}/camera.mjpg", flush=True)
+    print(f"  websocket   {ws}://{ip}:{args.port}", flush=True)
     print(f"  mirror      {mirror}  (camera faces backward)", flush=True)
-    print("  route       nav cues stay on; overlay can switch cars to Simulated", flush=True)
+    print(f"  nav         {args.nav}  ({route})", flush=True)
+    if secure:
+        print("  https       self-signed. Accept the warning on the phone, or use a tunnel.", flush=True)
     print("  rings       log only — run rings/datafeel_rings.py on this Mac", flush=True)
     print("", flush=True)
 
@@ -732,6 +812,7 @@ def banner(args) -> None:
 async def amain(args) -> None:
     # "real" is what the overlay already shows as the live sensor.
     hub = Hub(mode="synthetic" if args.synthetic else "real", source="real")
+    hub.nav_mode = args.nav
     hub.on_buzz = play_buzz
     hub.on_mode = lambda value: apply_source(hub, value)
     stop = asyncio.Event()
@@ -742,18 +823,26 @@ async def amain(args) -> None:
         except NotImplementedError:
             pass
 
-    serve_overlay(args.host, args.http_port, args.port)
-    banner(args)
+    tls = resolve_tls(args)
+    ssl_http, ssl_ws = tls if tls else (None, None)
+    serve_overlay(args.host, args.http_port, args.port, ssl_context=ssl_http)
+    banner(args, secure=tls is not None)
 
     from websockets.asyncio.server import serve
 
     try:
-        async with serve(hub.handler, args.host, args.port):
+        async with serve(hub.handler, args.host, args.port, ssl=ssl_ws):
             sensor = asyncio.create_task(
                 run_synthetic(hub, args, stop) if args.synthetic else run_camera(hub, args, stop)
             )
             route = asyncio.create_task(
-                simulate(hub, None, TICK_S, emit_cars=lambda: hub.source == "sim")
+                simulate(
+                    hub,
+                    None,
+                    TICK_S,
+                    emit_cars=lambda: hub.source == "sim",
+                    emit_nav=lambda: args.nav == "scripted",
+                )
             )
             await stop.wait()
             sensor.cancel()
@@ -785,6 +874,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="optional OpenCV window. Off by default; the overlay shows /camera.mjpg",
     )
     parser.add_argument("--synthetic", action="store_true", help="publish a scripted closing car, no camera or model")
+    parser.add_argument(
+        "--nav",
+        choices=("scripted", "spotter", "phone", "off"),
+        default="spotter",
+        help="who publishes turn cues (default spotter). scripted keeps the demo route",
+    )
+    parser.add_argument(
+        "--https",
+        action="store_true",
+        help="serve the pages and the websocket with a self-signed certificate (iPhone GPS)",
+    )
+    parser.add_argument("--https-cert", default="", help="PEM certificate for --https")
+    parser.add_argument("--https-key", default="", help="PEM private key for --https")
     parser.add_argument(
         "--cal",
         default="",

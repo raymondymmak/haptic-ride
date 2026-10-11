@@ -47,6 +47,22 @@ def check_rules(game_mod) -> None:
     labeled.on_nav({"type": "nav", "turn": "left", "in_m": 40, "id": "s", "source": "spotter"})
     assert labeled.snapshot()["nav"]["source"] == "spotter"
 
+    spot = game_mod.Game()
+    spot.now = 3
+    spot.on_nav({"type": "nav", "turn": "left", "in_m": 30, "id": "spot-1", "source": "spotter"})
+    assert spot.on_turn("left") is None
+    spot.on_nav({"type": "nav", "turn": "left", "in_m": 5, "id": "spot-1", "source": "spotter"})
+    assert spot.misses == 0
+    assert spot.snapshot()["nav"]["phase"] == "turn_now"
+    assert spot.on_turn("left") == game_mod.BASE_DRIFT
+    spot.on_nav({"type": "nav", "clear": True, "source": "spotter"})
+    assert spot.snapshot()["nav"] is None and spot.misses == 0
+    armed = game_mod.Game()
+    armed.now = 1
+    armed.on_nav({"type": "nav", "turn": "right", "in_m": 5, "id": "spot-2", "source": "spotter"})
+    armed.on_nav({"type": "nav", "clear": True})
+    assert armed.nav is None and armed.misses == 0
+
     game = game_mod.Game()
     game.now = 10
     game.on_nav({"type": "nav", "turn": "left", "in_m": 30, "id": "n"})

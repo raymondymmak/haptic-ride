@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#08090d">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Spotter · Haptic Ride</title>
+<style>
+  :root {
+    --bg: #08090d;
+    --ink: #f3f0ea;
+    --muted: #9aa196;
+    --left: #7fdfff;
+    --right: #ffc56b;
+    --now: #ff5d4a;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    color: var(--ink);
+    background: var(--bg);
+    font-family: "Avenir Next", "Segoe UI", sans-serif;
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: manipulation;
+  }
+  main {
+    min-height: 100dvh;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: calc(12px + env(safe-area-inset-top)) 12px calc(12px + env(safe-area-inset-bottom));
+  }
+  header {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 12px;
+  }
+  h1 {
+    margin: 0;
+    font-size: 15px;
+    letter-spacing: 0.16em;
+    font-weight: 700;
+  }
+  #link {
+    font-size: 13px;
+    letter-spacing: 0.12em;
+    color: var(--muted);
+  }
+  #link.live { color: #b6f2c4; }
+  #cue {
+    margin: 0;
+    min-height: 1.4em;
+    font-size: 18px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+  }
+  .grid {
+    flex: 1;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: 1fr 1fr auto;
+    gap: 10px;
+    min-height: 0;
+  }
+  button {
+    border: 0;
+    border-radius: 22px;
+    color: #081018;
+    font: inherit;
+    font-size: clamp(28px, 7vw, 44px);
+    font-weight: 800;
+    letter-spacing: 0.02em;
+    line-height: 0.95;
+    min-height: 22vh;
+    padding: 12px;
+  }
+  button:active { transform: scale(0.98); filter: brightness(1.12); }
+  .left { background: var(--left); }
+  .right { background: var(--right); }
+  .now { box-shadow: inset 0 0 0 4px rgba(0, 0, 0, 0.28); }
+  #clear {
+    grid-column: 1 / -1;
+    min-height: 12vh;
+    background: #232833;
+    color: var(--ink);
+    font-size: clamp(22px, 5vw, 32px);
+    letter-spacing: 0.18em;
+  }
+  p.note {
+    margin: 0;
+    color: var(--muted);
+    font-size: 13px;
+    line-height: 1.35;
+  }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>SPOTTER</h1>
+    <div id="link">OFFLINE</div>
+  </header>
+  <p id="cue">Tap a turn. The rings take it from here.</p>
+  <div class="grid">
+    <button type="button" class="left" data-turn="left" data-m="30">LEFT<br>SOON</button>
+    <button type="button" class="right" data-turn="right" data-m="30">RIGHT<br>SOON</button>
+    <button type="button" class="left now" data-turn="left" data-m="5">LEFT<br>NOW</button>
+    <button type="button" class="right now" data-turn="right" data-m="5">RIGHT<br>NOW</button>
+    <button type="button" id="clear">CLEAR</button>
+  </div>
+  <p class="note">SOON is 30 m. NOW is 5 m. CLEAR drops the cue without scoring a miss. Same Wi-Fi, plain HTTP.</p>
+</main>
+<script>
+const params = new URLSearchParams(location.search);
+let wsPort = params.get("ws") || "__WS_PORT__";
+if (!/^\d+$/.test(wsPort)) wsPort = "8765";
+const wsScheme = location.protocol === "https:" ? "wss://" : "ws://";
+const wsURL = params.get("url") || (wsScheme + location.hostname + ":" + wsPort);
+
+const cueEl = document.getElementById("cue");
+const linkEl = document.getElementById("link");
+let socket = null;
+let retry = 400;
+let cueId = null;
+let cueSide = null;
+let pending = null;
+
+function setLink(live) {
+  linkEl.textContent = live ? "LIVE" : "OFFLINE";
+  linkEl.className = live ? "live" : "";
+}
+
+function send(msg) {
+  pending = msg;
+  if (!socket || socket.readyState !== WebSocket.OPEN) return;
+  socket.send(JSON.stringify(msg));
+  pending = null;
+}
+
+function arm(turn, meters) {
+  if (cueSide !== turn || !cueId) {
+    cueId = "spotter-" + Date.now();
+    cueSide = turn;
+  }
+  const phase = meters <= 12 ? "NOW" : "SOON";
+  cueEl.textContent = turn.toUpperCase() + " · " + phase + " · " + meters + " m";
+  send({ type: "nav", turn: turn, in_m: meters, id: cueId, source: "spotter" });
+  if (navigator.vibrate) navigator.vibrate(18);
+}
+
+function clearCue() {
+  cueId = null;
+  cueSide = null;
+  cueEl.textContent = "Cleared";
+  send({ type: "nav", clear: true, source: "spotter" });
+}
+
+document.querySelector(".grid").addEventListener("click", (ev) => {
+  const btn = ev.target.closest("button");
+  if (!btn) return;
+  if (btn.id === "clear") {
+    clearCue();
+    return;
+  }
+  arm(btn.dataset.turn, Number(btn.dataset.m));
+});
+
+function connect() {
+  socket = new WebSocket(wsURL);
+  socket.onopen = () => {
+    retry = 400;
+    setLink(true);
+    if (pending) send(pending);
+  };
+  socket.onclose = () => {
+    setLink(false);
+    setTimeout(connect, retry);
+    retry = Math.min(2000, retry * 1.5);
+  };
+  socket.onerror = () => setLink(false);
+}
+connect();
+</script>
+</body>
+</html>

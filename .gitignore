@@ -3,6 +3,7 @@
 __pycache__/
 *.pyc
 logs/*.jsonl
+logs/*.pem
 logs/radar_background.json
 logs/wave_cal.json
 *.log

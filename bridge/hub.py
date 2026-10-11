@@ -68,6 +68,8 @@ class Hub:
         self.on_buzz = None
         # (value) -> "sim" | "real" | None. None leaves the source unchanged.
         self.on_mode = None
+        # scripted | spotter | phone | off. Empty on bridges that always script the route.
+        self.nav_mode = ""
         self._lock = asyncio.Lock()
         self._buzz_log: dict[str, tuple] = {}
 
@@ -113,12 +115,15 @@ class Hub:
         who = getattr(ws, "remote_address", "?")
         print(f"join   {who}  ({len(self.clients)} on the bus)", flush=True)
         try:
-            await ws.send(json.dumps({
+            hello = {
                 "type": "hello",
                 "role": "bridge",
                 "mode": self.mode,
                 "source": self.source,
-            }))
+            }
+            if self.nav_mode:
+                hello["nav"] = self.nav_mode
+            await ws.send(json.dumps(hello))
             async for raw in ws:
                 try:
                     msg = json.loads(raw)
@@ -150,8 +155,15 @@ class Hub:
             print(f"leave  {who}  ({len(self.clients)} on the bus)", flush=True)
 
 
-def serve_overlay(host: str, http_port: int, ws_port: int) -> None:
-    page = OVERLAY.read_bytes()
+def serve_overlay(host: str, http_port: int, ws_port: int, ssl_context=None) -> None:
+    pages = {
+        "/": OVERLAY,
+        "/index.html": OVERLAY,
+        "/spotter": ROOT / "overlay" / "spotter.html",
+        "/nav": ROOT / "overlay" / "nav.html",
+    }
+    raw_pages = {route: path.read_bytes() for route, path in pages.items()}
+    token = str(ws_port).encode()
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):  # noqa: N802
@@ -163,10 +175,10 @@ def serve_overlay(host: str, http_port: int, ws_port: int) -> None:
             if path == "/camera.mjpg":
                 self._stream_camera()
                 return
-            if path not in ("/", "/index.html"):
+            if path not in raw_pages:
                 self.send_error(404)
                 return
-            body = page.replace(b"__WS_PORT__", str(ws_port).encode())
+            body = raw_pages[path].replace(b"__WS_PORT__", token)
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -212,6 +224,8 @@ def serve_overlay(host: str, http_port: int, ws_port: int) -> None:
         httpd = Server((host, http_port), Handler)
     except OSError as exc:
         raise SystemExit(f"overlay port {http_port} is already in use ({exc})") from exc
+    if ssl_context is not None:
+        httpd.socket = ssl_context.wrap_socket(httpd.socket, server_side=True)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
 
 

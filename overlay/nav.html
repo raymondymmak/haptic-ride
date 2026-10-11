@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#08090d">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Phone GPS · Haptic Ride</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+<style>
+  :root {
+    --bg: #08090d;
+    --ink: #f3f0ea;
+    --muted: #9aa196;
+    --left: #7fdfff;
+    --right: #ffc56b;
+    --panel: #12151c;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    color: var(--ink);
+    background: var(--bg);
+    font-family: "Avenir Next", "Segoe UI", sans-serif;
+    display: flex;
+    flex-direction: column;
+    min-height: 100dvh;
+    user-select: none;
+    touch-action: manipulation;
+  }
+  header, .sheet, #https-note {
+    padding-left: max(12px, env(safe-area-inset-left));
+    padding-right: max(12px, env(safe-area-inset-right));
+  }
+  header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    gap: 12px;
+    padding-top: calc(10px + env(safe-area-inset-top));
+    padding-bottom: 8px;
+  }
+  h1 { margin: 0; font-size: 14px; letter-spacing: 0.16em; }
+  #acc { font-size: 28px; font-weight: 800; line-height: 1; }
+  #acc span { font-size: 13px; font-weight: 600; letter-spacing: 0.08em; color: var(--muted); }
+  #link { font-size: 12px; letter-spacing: 0.14em; color: var(--muted); }
+  #link.live { color: #b6f2c4; }
+  #https-note {
+    margin: 0 0 8px;
+    color: #ffc56b;
+    font-size: 13px;
+    line-height: 1.35;
+  }
+  #https-note[hidden] { display: none; }
+  #map { flex: 1; min-height: 180px; background: #1a1e27; }
+  .cross {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 22px;
+    height: 22px;
+    margin: -11px 0 0 -11px;
+    pointer-events: none;
+    z-index: 500;
+  }
+  .cross::before, .cross::after {
+    content: "";
+    position: absolute;
+    background: #fff;
+    box-shadow: 0 0 0 1px #000;
+  }
+  .cross::before { left: 10px; top: 0; width: 2px; height: 22px; }
+  .cross::after { left: 0; top: 10px; width: 22px; height: 2px; }
+  .sheet {
+    background: var(--panel);
+    padding-top: 10px;
+    padding-bottom: calc(10px + env(safe-area-inset-bottom));
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  #status { margin: 0; font-size: 15px; font-weight: 700; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  button {
+    border: 0;
+    border-radius: 16px;
+    min-height: 58px;
+    font: inherit;
+    font-size: 18px;
+    font-weight: 800;
+    letter-spacing: 0.03em;
+    color: #081018;
+  }
+  button:active { filter: brightness(1.12); }
+  .left { background: var(--left); }
+  .right { background: var(--right); }
+  .ghost { background: #232833; color: var(--ink); }
+  .go { background: #f3f0ea; }
+  .go.on { background: #ff5d4a; color: #fff; }
+  .leaflet-control-attribution { font-size: 10px; }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>PHONE GPS</h1>
+    <div id="link">OFFLINE</div>
+  </div>
+  <div id="acc">— <span>ACCURACY</span></div>
+</header>
+<p id="https-note" hidden>iPhone location needs HTTPS. On the Mac, run the camera bridge with --https and open https://&lt;lan-ip&gt;:8641/nav, or use a tunnel and add ?url=wss://…</p>
+<div id="map"></div>
+<section class="sheet">
+  <p id="status">Pan the crosshair onto a corner, then drop the turn.</p>
+  <div class="row">
+    <button type="button" class="left" id="drop-left">DROP LEFT</button>
+    <button type="button" class="right" id="drop-right">DROP RIGHT</button>
+  </div>
+  <div class="row">
+    <button type="button" class="ghost" id="undo">UNDO</button>
+    <button type="button" class="ghost" id="clear-cue">CLEAR</button>
+  </div>
+  <button type="button" class="go" id="ride">START GPS</button>
+</section>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<script>
+const SOON_M = 40;
+const NOW_M = 12;
+const PASS_M = 22;
+const STORE = "haptic-ride-waypoints";
+
+const params = new URLSearchParams(location.search);
+let wsPort = params.get("ws") || "__WS_PORT__";
+if (!/^\d+$/.test(wsPort)) wsPort = "8765";
+const wsScheme = location.protocol === "https:" ? "wss://" : "ws://";
+const wsURL = params.get("url") || (wsScheme + location.hostname + ":" + wsPort);
+
+const accEl = document.getElementById("acc");
+const linkEl = document.getElementById("link");
+const statusEl = document.getElementById("status");
+const rideBtn = document.getElementById("ride");
+const httpsNote = document.getElementById("https-note");
+if (!window.isSecureContext) httpsNote.hidden = false;
+
+let socket = null;
+let retry = 400;
+let pending = null;
+let watchId = null;
+let riding = false;
+let here = null;
+let accuracy = null;
+let nextIndex = 0;
+let enteredNow = false;
+let lastSend = 0;
+let lastMeters = null;
+let waypoints = [];
+const markers = [];
+let rider = null;
+
+function loadRoute() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(STORE) || "{}");
+    const rows = Array.isArray(saved) ? saved : saved.waypoints;
+    if (Array.isArray(rows)) waypoints = rows.filter((wp) => wp && (wp.turn === "left" || wp.turn === "right"));
+    if (!Array.isArray(saved) && Number.isInteger(saved.next)) nextIndex = saved.next;
+  } catch (err) {
+    waypoints = [];
+  }
+  if (nextIndex < 0 || nextIndex > waypoints.length) nextIndex = 0;
+}
+
+function saveRoute() {
+  try {
+    localStorage.setItem(STORE, JSON.stringify({ waypoints: waypoints, next: nextIndex }));
+  } catch (err) { /* private mode */ }
+}
+
+function metersBetween(a, b) {
+  const R = 6371000;
+  const p1 = a.lat * Math.PI / 180;
+  const p2 = b.lat * Math.PI / 180;
+  const dLat = (b.lat - a.lat) * Math.PI / 180;
+  const dLon = (b.lon - a.lon) * Math.PI / 180;
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(p1) * Math.cos(p2) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
+}
+
+function send(msg) {
+  pending = msg;
+  if (!socket || socket.readyState !== WebSocket.OPEN) return;
+  socket.send(JSON.stringify(msg));
+  pending = null;
+}
+
+function setLink(live) {
+  linkEl.textContent = live ? "LIVE" : "OFFLINE";
+  linkEl.className = live ? "live" : "";
+}
+
+function paintAccuracy() {
+  if (accuracy == null) {
+    accEl.innerHTML = "— <span>ACCURACY</span>";
+    return;
+  }
+  accEl.innerHTML = "±" + Math.round(accuracy) + " m <span>ACCURACY</span>";
+}
+
+function paintStatus() {
+  if (!waypoints.length) {
+    statusEl.textContent = "No turns yet. SOON inside " + SOON_M + " m, NOW inside " + NOW_M + " m.";
+    return;
+  }
+  const left = waypoints.length - nextIndex;
+  const wp = waypoints[nextIndex];
+  if (!wp) {
+    statusEl.textContent = "Route done. " + waypoints.length + " turns saved.";
+    return;
+  }
+  let dist = "";
+  if (here) dist = " · " + Math.round(metersBetween(here, wp)) + " m";
+  statusEl.textContent = "Next " + wp.turn.toUpperCase() + dist + " · " + left + " left";
+  if (accuracy != null && accuracy > 25) statusEl.textContent += " · GPS is coarse";
+}
+
+function redraw() {
+  markers.forEach((marker) => marker.remove());
+  markers.length = 0;
+  waypoints.forEach((wp, index) => {
+    const marker = L.circleMarker([wp.lat, wp.lon], {
+      radius: index === nextIndex ? 11 : 7,
+      color: wp.turn === "left" ? "#7fdfff" : "#ffc56b",
+      weight: 3,
+      fillOpacity: 0.85,
+      fillColor: wp.turn === "left" ? "#7fdfff" : "#ffc56b",
+    }).addTo(map);
+    marker.bindTooltip(String(index + 1) + " " + wp.turn.toUpperCase(), { permanent: true, direction: "top", offset: [0, -8] });
+    markers.push(marker);
+  });
+  paintStatus();
+}
+
+function drop(turn) {
+  const center = map.getCenter();
+  waypoints.push({
+    id: Date.now().toString(36) + "-" + waypoints.length,
+    lat: center.lat,
+    lon: center.lng,
+    turn: turn,
+  });
+  saveRoute();
+  redraw();
+}
+
+function clearNav() {
+  enteredNow = false;
+  lastMeters = null;
+  send({ type: "nav", clear: true, source: "gps" });
+}
+
+const map = L.map("map", { zoomControl: false }).setView([20, 0], 2);
+L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  maxZoom: 19,
+  attribution: "&copy; OpenStreetMap",
+}).addTo(map);
+const cross = document.createElement("div");
+cross.className = "cross";
+map.getContainer().appendChild(cross);
+loadRoute();
+redraw();
+
+function publish(pos) {
+  here = { lat: pos.coords.latitude, lon: pos.coords.longitude };
+  accuracy = Number(pos.coords.accuracy);
+  paintAccuracy();
+  if (!rider) {
+    rider = L.circleMarker([here.lat, here.lon], {
+      radius: 8, color: "#f3f0ea", weight: 3, fillColor: "#ff5d4a", fillOpacity: 1,
+    }).addTo(map);
+    if (!waypoints.length) map.setView([here.lat, here.lon], 17);
+  } else {
+    rider.setLatLng([here.lat, here.lon]);
+  }
+  if (!riding) {
+    paintStatus();
+    return;
+  }
+  while (waypoints[nextIndex]) {
+    const wp = waypoints[nextIndex];
+    const dist = metersBetween(here, wp);
+    if (enteredNow && dist > PASS_M) {
+      enteredNow = false;
+      nextIndex += 1;
+      lastMeters = null;
+      saveRoute();
+      redraw();
+      clearNav();
+      continue;
+    }
+    if (dist <= NOW_M) enteredNow = true;
+    if (dist > SOON_M) break;
+    const nowMs = Date.now();
+    if (lastMeters != null && Math.abs(dist - lastMeters) < 1 && nowMs - lastSend < 500) break;
+    lastSend = nowMs;
+    lastMeters = dist;
+    send({
+      type: "nav",
+      turn: wp.turn,
+      in_m: Math.round(dist * 10) / 10,
+      id: "gps-" + wp.id,
+      source: "gps",
+      accuracy: accuracy == null ? null : Math.round(accuracy * 10) / 10,
+    });
+    break;
+  }
+  paintStatus();
+}
+
+function onGeoError(err) {
+  if (here) return;
+  statusEl.textContent = err && err.code === 1
+    ? "Location permission denied."
+    : "No GPS fix yet.";
+}
+
+function startRide() {
+  if (!navigator.geolocation) {
+    statusEl.textContent = "This browser has no geolocation.";
+    return;
+  }
+  riding = true;
+  rideBtn.textContent = "PAUSE";
+  rideBtn.classList.add("on");
+  if (watchId == null) {
+    watchId = navigator.geolocation.watchPosition(publish, onGeoError, {
+      enableHighAccuracy: true,
+      maximumAge: 1000,
+      timeout: 8000,
+    });
+  }
+}
+
+function pauseRide() {
+  riding = false;
+  rideBtn.textContent = "START GPS";
+  rideBtn.classList.remove("on");
+}
+
+rideBtn.addEventListener("click", () => { riding ? pauseRide() : startRide(); });
+document.getElementById("drop-left").addEventListener("click", () => drop("left"));
+document.getElementById("drop-right").addEventListener("click", () => drop("right"));
+document.getElementById("undo").addEventListener("click", () => {
+  waypoints.pop();
+  if (nextIndex > waypoints.length) nextIndex = waypoints.length;
+  saveRoute();
+  redraw();
+});
+document.getElementById("clear-cue").addEventListener("click", () => {
+  clearNav();
+  statusEl.textContent = "Cue cleared. The route is still on the map.";
+});
+
+if (navigator.geolocation) {
+  navigator.geolocation.getCurrentPosition(publish, () => {}, { enableHighAccuracy: true, timeout: 8000 });
+}
+
+function connect() {
+  socket = new WebSocket(wsURL);
+  socket.onopen = () => {
+    retry = 400;
+    setLink(true);
+    if (pending) send(pending);
+  };
+  socket.onclose = () => {
+    setLink(false);
+    setTimeout(connect, retry);
+    retry = Math.min(2000, retry * 1.5);
+  };
+  socket.onerror = () => setLink(false);
+}
+connect();
+</script>
+</body>
+</html>

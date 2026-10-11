@@ -715,7 +715,7 @@ const CLASS_LABEL = {
   bus: "BUS",
   truck: "TRUCK",
 };
-const NAV_LABEL = { gps: "PHONE GPS", phone: "PHONE GPS", spotter: "SPOTTER", scripted: "SCRIPTED" };
+const NAV_LABEL = { gps: "PHONE GPS", phone: "PHONE GPS", spotter: "SPOTTER", scripted: "SCRIPTED", off: "OFF" };
 const VIBE = {
   turn_soon: [30, 110, 30],
   turn_now: [80, 50, 80, 50, 140],
@@ -735,7 +735,9 @@ if (focus === "left" || focus === "right") {
 
 let wsPort = params.get("ws") || "__WS_PORT__";
 if (!/^\d+$/.test(wsPort)) wsPort = "8765";
-const wsURL = params.get("url") || ("ws://" + location.hostname + ":" + wsPort);
+const wsScheme = location.protocol === "https:" ? "wss://" : "ws://";
+const wsURL = params.get("url") || (wsScheme + location.hostname + ":" + wsPort);
+let navMode = "";
 
 const cars = new Map();
 const rings = { left: null, right: null };
@@ -913,15 +915,26 @@ function paintRing(side, checks) {
   glow.style.setProperty("--c", color);
 }
 
+function navSourceHtml(key, accuracy) {
+  const name = NAV_LABEL[key];
+  if (!name) return "NAV · <b>—</b>";
+  let extra = "";
+  if ((key === "gps" || key === "phone") && accuracy != null && accuracy !== "") {
+    const meters = Number(accuracy);
+    if (!Number.isNaN(meters)) extra = " · ±" + Math.round(meters) + " m";
+  }
+  return "NAV · <b>" + name + extra + "</b>";
+}
+
 function paintNav(nav) {
   const box = document.getElementById("nav");
   const sourceEl = document.getElementById("nav-source");
-  if (!nav) {
+  if (!nav || !nav.turn) {
     box.className = "nav";
     document.getElementById("phase").textContent = "OPEN ROAD";
     document.getElementById("meters").textContent = "—";
     document.getElementById("turn-name").textContent = "no cue yet";
-    sourceEl.innerHTML = "NAV · <b>—</b>";
+    sourceEl.innerHTML = navSourceHtml(navMode, null);
     return;
   }
   const phase = nav.phase || "far";
@@ -929,14 +942,7 @@ function paintNav(nav) {
   document.getElementById("phase").textContent = phase === "turn_now" ? "NOW" : phase === "turn_soon" ? "SOON" : "AHEAD";
   document.getElementById("meters").textContent = Math.max(0, Math.round(nav.in_m)) + "m";
   document.getElementById("turn-name").textContent = nav.turn.toUpperCase() + " TURN";
-  const key = String(nav.source || "");
-  const name = NAV_LABEL[key] || "—";
-  let extra = "";
-  if ((key === "gps" || key === "phone") && nav.accuracy != null && nav.accuracy !== "") {
-    const meters = Number(nav.accuracy);
-    if (!Number.isNaN(meters)) extra = " · ±" + Math.round(meters) + " m";
-  }
-  sourceEl.innerHTML = "NAV · <b>" + name + extra + "</b>";
+  sourceEl.innerHTML = navSourceHtml(String(nav.source || navMode || ""), nav.accuracy);
 }
 
 function paintRadar() {
@@ -1092,6 +1098,14 @@ function onMsg(msg) {
   if (msg.type === "hello") {
     if (msg.source === "sim" || msg.source === "real") setSource(msg.source);
     else setSource(msg.mode === "fake" ? "sim" : "real");
+    if (typeof msg.nav === "string" && msg.nav) {
+      navMode = msg.nav === "phone" ? "gps" : msg.nav;
+      if (!document.getElementById("nav").classList.contains("turn_soon")
+        && !document.getElementById("nav").classList.contains("turn_now")
+        && !document.getElementById("nav").classList.contains("far")) {
+        document.getElementById("nav-source").innerHTML = navSourceHtml(navMode, null);
+      }
+    }
     setStatus(true, msg.mode);
   } else if (msg.type === "mode") {
     setSource(msg.value);
@@ -1102,7 +1116,8 @@ function onMsg(msg) {
     cars.set(msg.id || msg.side, msg);
     paintRadar();
   } else if (msg.type === "nav" && !sawState) {
-    paintNav({
+    if (msg.clear) paintNav(null);
+    else paintNav({
       turn: msg.turn,
       in_m: msg.in_m,
       phase: msg.in_m <= 12 ? "turn_now" : msg.in_m <= 45 ? "turn_soon" : "far",
