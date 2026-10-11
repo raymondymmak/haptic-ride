@@ -10,6 +10,23 @@ Haptic Ride lets cyclists navigate and spot cars behind them by feel, so their e
 - A **Genki Wave** reads real turns from the IMU (about 45° of yaw) and a flick dismisses the current car warning. The Wave does not buzz. The Dots do.
 - Scoring is Mario Kart-style and rewards attention. A shoulder check on a warning is an item box. A fast close is a blue shell. A Wave turn that matches the cue during NOW is a drift boost. Missing a car, or missing NOW, breaks the combo.
 
+## What it looks like
+
+![Haptic Ride overlay](docs/overlay.png)
+
+A quick tour of the overlay, top to bottom:
+
+- **Header.** `HAPTIC RIDE`, the hub connection status, and a **SIMULATED / REAL** toggle for the traffic source.
+- **Score** (top right), big, with a **COMBO** meter under it.
+- **Ring panels**, left and right. Each wrist shows its state (`QUIET` when idle), the current buzz intensity (`0.00`–`1.00`), and an LED indicator.
+- **Nav card.** An arrow and the turn cue (`OPEN ROAD / no cue yet` when there is none), plus status for the Wave ring connection, the last gesture, and the nav source (`SPOTTER`).
+- **Rear view.** Split into **LEFT / BEHIND / RIGHT** zones with a distance scale (close, 15 m, far). A detected rider or car appears as a marker in its zone. In the screenshot it is in **BEHIND**, labeled `both rings`.
+- **Live camera** (picture-in-picture) with the same zone lines drawn over it.
+- **Keyboard row.** `A` check left, `S` look back, `D` check right, `F` dismiss, `←` / `→` turn, `M` sound off. These let you play in SIMULATED mode with no hardware.
+- **Event log** (bottom right), e.g. `buzz both car_behind 1.00`, with item, dodge, and drift counters.
+
+**Try it without hardware.** From the repo root, run `./run.sh`. It starts the simulated bridge (`bridge/fake_bridge.py`) and the engine, then open [http://127.0.0.1:8641](http://127.0.0.1:8641) and use the keys above.
+
 ## Hardware
 
 - **DataFeel Dots** on **El Jefe** (USB serial). One chain or one module per wrist.
