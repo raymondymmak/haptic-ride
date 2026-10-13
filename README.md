@@ -2,6 +2,12 @@
 
 Haptic Ride lets cyclists navigate and spot cars behind them by feel, so their eyes stay on the road.
 
+## Demo
+
+[![Haptic Ride demo](docs/demo.gif)](docs/haptic-ride-demo.mp4)
+
+▶ [Watch the 43s demo with sound](docs/haptic-ride-demo.mp4)
+
 ## What it does
 
 - A rear camera runs YOLO on the Mac and sorts traffic into **LEFT**, **BEHIND**, and **RIGHT**. The overlay shows the boxes and the class (car, person, bike, bus, truck).
